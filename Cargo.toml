@@ -136,7 +136,7 @@ members = [
     "libs/client-websocket",
     "libs/client-api-test-util",
     "libs/wasm-test",
-    "libs/appflowy-ai",
+    "libs/appflowy-ai", "lib/app-error",
 ]
 
 [workspace.dependencies]
