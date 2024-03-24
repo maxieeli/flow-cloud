@@ -117,18 +117,13 @@ path = "src/lib.rs"
 
 [workspace]
 members = [
-    "libs/snowflake",
     "libs/realtime",
     "libs/realtime-entity",
     "libs/database",
-    "libs/database-entity",
     "libs/client-api",
-    "libs/infra",
     "libs/shared-entity",
     "libs/gotrue",
-    "libs/gotrue-entity",
     "admin_frontend",
-    "libs/app-error",
     "libs/workspace-template",
     "libs/encrypt",
     "libs/realtime-protocol",
@@ -136,7 +131,12 @@ members = [
     "libs/client-websocket",
     "libs/client-api-test-util",
     "libs/wasm-test",
-    "libs/appflowy-ai", "lib/app-error", "lib/infra", "lib/snowflake", "lib/gotrue-entity",
+    "libs/appflowy-ai",
+    "lib/app-error",
+    "lib/infra",
+    "lib/snowflake",
+    "lib/gotrue-entity",
+    "lib/database-entity",
 ]
 
 [workspace.dependencies]
