@@ -156,9 +156,32 @@ impl<Msg> CollabSinkRunner<Msg> {
             sink.notify();
         }
         loop {
-        
+            // stops the runner if the notifier was closed
+            if notifier.changed().await.is_err() {
+                break;
+            }
+            if let Some(sync_sink) = weak_sink.upgrade() {
+                let value = notifier.borrow().clone();
+                match value {
+                    SinkSignal::Stop => break,
+                    SinkSignal::Proceed => {
+                        sync_sink.process_next_msg().await;
+                    },
+                    SinkSignal::ProcessAfterMillis(millis) => {
+                        sleep(Duration::from_millis(millis)).await;
+                        sync_sink.process_next_msg().await;
+                    },
+                }
+            } else {
+                break;
+            }
         }
     }
+}
+
+pub trait MsgIdCounter: Send + Sync + 'static {
+    /// Get the next message id. The message id should be unique.
+    fn next(&self) -> MsgId;
 }
 
 #[derive(Debug, Default)]
