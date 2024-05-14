@@ -151,6 +151,23 @@ where
         }
         // Clear all the pending messages and send the init message immediately.
         self.clear();
+        // When the client is connected, remove all pending messages and send the init message.
+        let mut msg_queue = self.message_queue.lock();
+        let msg_id = self.msg_id_counter.next();
+        let init_sync = f(msg_id);
+        trace!("🔥queue {}", init_sync);
+        msg_queue.push_msg(msg_id, init_sync);
+        let _ = self.notifier.send(SinkSignal::Proceed);
+    }
+
+    pub fn can_queue_init_sync(&self) -> bool {
+        let msg_queue = self.message_queue.lock();
+        if let Some(msg) = msg_queue.peek() {
+            if msg.message().is_client_init_sync() {
+                return false;
+            }
+        }
+        true
     }
 
 }
