@@ -2,6 +2,7 @@ use crate::af_spawn;
 use crate::collab_sync::sink_config::SinkConfig;
 use crate::collab_sync::sink_queue::{QueueItem, SinkQueue};
 use crate::collab_sync::SyncObject;
+use alloc::sync;
 use futures_util::SinkExt;
 
 use realtime_entity::collab_msg::{CollabSinkMessage, MsgId, ServerCollabMessage};
@@ -79,8 +80,79 @@ where
         pause: bool,
     ) -> Self {
         let msg_id_counter = DefaultMsgIdCounter::new();
-
+        let notifier = Arc::new(notifier);
+        let state_notifier = Arc::new(sync_state_tx);
+        let sender = Arc::new(Mutex::new(sink));
+        let msg_queue = SinkQueue::new(uid);
+        let message_queue = Arc::new(parking_lot::Mutex::new(msg_queue));
+        let msg_id_counter = Arc::new(msg_id_counter);
+        let flying_messages = Arc::new(parking_lot::Mutex::new(HashSet::new()));
+        let mut interval = interval(SEND_INTERVAL);
+        let weak_notifier = Arc::downgrade(&notifier);
+        let weak_flying_messages = Arc::downgrade(&flying_messages);
+        af_spawn(async move {
+            // initial delay to make sure the first tick waits for send_interval
+            sleep(SEND_INTERVAL).await;
+            loop {
+                interval.tick().await;
+                match weak_notifier.upgrade() {
+                    Some(notifier) => {
+                        // Removing the flying messages allows for the re-sending of the top k messages in the message queue.
+                        if let Some(flying_messages) = weak_flying_messages.upgrade() {
+                            flying_messages.lock().clear();
+                        }
+                        if notifier.send(SinkSignal::Proceed).is_err() {
+                            break;
+                        }
+                    },
+                    None => break,
+                }
+            }
+        });
+        Self {
+            uid,
+            sender,
+            message_queue,
+            msg_id_counter,
+            notifier,
+            state_notifier,
+            config,
+            pause: AtomicBool::new(pause),
+            object,
+            flying_messages,
+        }
     }
+
+    /// Put the message into the queue and notify the sink to process the next message.
+    /// After the [Msg] was pushed into the [SinkQueue]. The queue will pop the next msg base on
+    /// its priority. And the message priority is determined by the [Msg] that implement the [Ord] and
+    /// [PartialOrd] trait. Check out the [CollabMessage] for more details.
+    pub fn queue_msg(&self, f: impl FnOnce(MsgId) -> Msg) {
+        if !self.state_notifier.borrow().is_syncing() {
+            let _ = self.state_notifier.send(SinkState::Syncing);
+        }
+        let mut msg_queue = self.message_queue.lock();
+        let msg_id = self.msg_id_counter.next();
+        let new_msg = f(msg_id);
+        trace!("🔥 queue {}", new_msg);
+        msg_queue.push_msg(msg_id, new_msg);
+        drop(msg_queue);
+        let _ = self
+            .notifier
+            .send(SinkSignal::ProcessAfterMillis(COLLAB_SINK_DELAY_MILLIS));
+        self.merge();
+    }
+
+    /// When queue the init message, the sink will clear all the pending messages and send the init
+    /// message immediately.
+    pub fn queue_init_sync(&self, f: impl FnOnce(MsgId) -> Msg) {
+        if !self.state_notifier.borrow().is_syncing() {
+            let _ = self.state_notifier.send(SinkState::Syncing);
+        }
+        // Clear all the pending messages and send the init message immediately.
+        self.clear();
+    }
+
 }
 
 fn get_next_batch_item<Msg>(
