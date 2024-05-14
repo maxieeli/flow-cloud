@@ -187,3 +187,11 @@ pub trait MsgIdCounter: Send + Sync + 'static {
 #[derive(Debug, Default)]
 pub struct DefaultMsgIdCounter(Arc<AtomicU64>);
 
+impl DefaultMsgIdCounter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    fn next(&self) -> MsgId {
+        self.0.fetch_add(1, Ordering::SeqCst)
+    }
+}
