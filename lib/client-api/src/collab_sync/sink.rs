@@ -294,7 +294,61 @@ where
             },
         }
     }
+    
+    fn merge(&self) {
+        if self.config.disable_merge_message {
+            return;
+        }
+        if let (Some(flying_messages), Some(mut msg_queue)) = (
+            self.flying_messages.try_lock(),
+            self.message_queue.try_lock(),
+        ) {
+            let mut items: Vec<QueueItem<Msg>> = Vec::with_capacity(msg_queue.len());
+            let mut merged_ids = HashMap::new();
+            while let Some(next) = msg_queue.pop() {
+                // If the message is in the flying messages, it means the message is sending to the remote.
+                // So don't merge the message.
+                if flying_messages.contains(&next.msg_id()) {
+                    items.push(next);
+                    continue;
+                }
+                // Try to merge the next message with the last message. Only merge when:
+                // 1. The last message is not in the flying messages.
+                // 2. The last message can be merged.
+                // 3. The last message's payload size is less than the maximum payload size.
+                if let Some(last) = items.last_mut() {
+                    if !flying_messages.contains(&last.msg_id())
+                        && last.message().payload_size() < self.config.maximum_payload_size
+                        && last.mergeable()
+                        && last.merge(&next, &self.config.maximum_payload_size).is_ok()
+                    {
+                        merged_ids
+                            .entry(last.msg_id())
+                            .or_insert(vec![])
+                            .push(next.msg_id());
+                        continue;
+                    }
+                }
+                items.push(next);
+            }
+            if cfg!(debug_assertions) {
+                for (msg_id, merged_ids) in merged_ids {
+                    trace!(
+                        "{}: merged {:?} messages into: {:?}",
+                        self.object.object_id,
+                        merged_ids,
+                        msg_id
+                    );
+                }
+            }
+            msg_queue.extend(items);
+        }
+    }
 
+    /// notify the sink to process the next message
+    pub(crate) fn notify(&self) {
+        let _ = self.notifier.send(SinkSignal::Proceed);
+    }
 }
 
 fn get_next_batch_item<Msg>(
