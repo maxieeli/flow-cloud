@@ -169,6 +169,74 @@ where
         }
         true
     }
+    pub fn clear(&self) {
+        match self.message_queue.try_lock() {
+            None => error!("failed to acquire the lock of the sink"),
+            Some(mut msg_queue) => {
+                msg_queue.clear();
+            },
+        }
+        match self.flying_messages.try_lock() {
+            None => error!("failed to acquire the lock of the flying message"),
+            Some(mut flying_messages) => {
+                flying_messages.clear();
+            },
+        }
+    }
+    pub fn pause(&self) {
+        self.pause.store(true, Ordering::SeqCst);
+        let _ = self.state_notifier.send(SinkState::Pause);
+    }
+    pub fn resume(&self) {
+        self.pause.store(false, Ordering::SeqCst);
+        self.notify();
+    }
+    /// Notify the sink to process the next message and mark the current message as done.
+    /// Returns bool value to indicate whether the message is valid.
+    pub async fn validate_response(&self, server_message: &ServerCollabMessage) -> bool {
+        if server_message.msg_id().is_none() {
+            return true;
+        }
+        // safety: msg_id is not None
+        let income_message_id = server_message.msg_id().unwrap();
+        let mut flying_messages = self.flying_messages.lock();
+        // if the message id is not in the flying messages, it means the message is invalid.
+        if !flying_messages.contains(&income_message_id) {
+            return false;
+        }
+        let mut message_queue = self.message_queue.lock();
+        let mut is_valid = false;
+        if let Some(current_item) = message_queue.pop() {
+            if current_item.msg_id() != income_message_id {
+                error!(
+                    "{} expect message id:{}, but receive:{}",
+                    self.object.object_id,
+                    current_item.msg_id(),
+                    income_message_id,
+                );
+                message_queue.push(current_item);
+            } else {
+                is_valid = true;
+                flying_messages.remove(&income_message_id);
+            }
+        }
+        trace!(
+            "{:?}: pending count:{} ids:{}",
+            self.object.object_id,
+            message_queue.len(),
+            message_queue
+                .iter()
+                .map(|item| item.msg_id().to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        if message_queue.is_empty() {
+            if let Err(e) = self.state_notifier.send(SinkState::Finished) {
+                error!("send sink state failed: {}", e);
+            }
+        }
+        is_valid
+    }
 
 }
 
