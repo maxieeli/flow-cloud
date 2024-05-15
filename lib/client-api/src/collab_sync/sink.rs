@@ -238,6 +238,63 @@ where
         is_valid
     }
 
+    async fn process_next_msg(&self) {
+        if self.pause.load(Ordering::SeqCst) {
+            return;
+        }
+        let items = {
+            let (mut msg_queue, mut flying_messages) = match (
+                self.message_queue.try_lock(),
+                self.flying_messages.try_lock(),
+            ) {
+                (Some(msg_queue), Some(flying_messages)) => (msg_queue, flying_messages),
+                _ => {
+                    retry_later(Arc::downgrade(&self.notifier));
+                    return;
+                },
+            };
+            get_next_batch_item(&self.object.object_id, &mut flying_messages, &mut msg_queue)
+        };
+        if items.is_empty() {
+            return;
+        }
+        self.send_immediately(items).await;
+    }
+
+    async fn send_immediately(&self, items: Vec<QueueItem<Msg>>) {
+        let message_ids = items.iter().map(|item| item.msg_id()).collect::<Vec<_>>();
+        let messages = items
+            .into_iter()
+            .map(|item| item.into_message())
+            .collect::<Vec<_>>();
+        match self.sender.try_lock() {
+            Ok(mut sender) => match sender.send(messages).await {
+                Ok(_) => {
+                    trace!(
+                        "🔥 sending {} messages {:?}",
+                        self.object.object_id,
+                        message_ids
+                    );
+                },
+                Err(err) => {
+                    error!("Failed to send error: {:?}", err.into());
+                    self
+                        .flying_messages
+                        .lock()
+                        .retain(|id| !message_ids.contains(id));
+                },
+            },
+            Err(_) => {
+                warn!("failed to acquire the lock of the sink, retry later");
+                self
+                    .flying_messages
+                    .lock()
+                    .retain(|id| !message_ids.contains(id));
+                retry_later(Arc::downgrade(&self.notifier));
+            },
+        }
+    }
+
 }
 
 fn get_next_batch_item<Msg>(
