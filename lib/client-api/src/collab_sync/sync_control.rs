@@ -121,6 +121,29 @@ where
             sync_state,        
         }
     }
+
+    pub fn pause(&self) {
+        trace!("pause {} sync", self.object.object_id);
+        self.sink.pause();
+    }
+    
+    pub fn resume(&self) {
+        trace!("resume {} sync", self.object.object_id);
+        self.sink.resume();
+    }
+    
+    pub fn subscribe_sync_state(&self) -> watch::Receiver<SyncState> {
+        self.sync_state.subscribe()
+    }
+
+    pub fn init_sync(&self, collab: &Collab) {
+        _init_sync(self.origin.clone(), &self.object, collab, &self.sink);
+    }
+    
+    /// Remove all the messages in the sink queue
+    pub fn clear(&self) {
+        self.sink.clear();
+    }
 }
 
 fn doc_init_state<P: CollabSyncProtocol>(awareness: &Awareness, protocol: &P) -> Option<Vec<u8>> {
