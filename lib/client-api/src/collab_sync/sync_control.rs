@@ -213,6 +213,86 @@ where
     Sink: SinkExt<Vec<ClientCollabMessage>, Error = E> + Send + Sync + Unpin + 'static,
     Stream: StreamExt<Item = Result<ServerCollabMessage, E>> + Send + Sync + Unpin + 'static,
 {
+    pub fn new(
+        origin: CollabOrigin,
+        object: SyncObject,
+        stream: Stream,
+        weak_collab: Weak<MutexCollab>,
+        sink: Weak<CollabSink<Sink, ClientCollabMessage>>,
+    ) -> Self {
+        let seq_num = Arc::new(AtomicU32::new(0));
+        let last_init_sync = LastSyncTime::new();
+        let object_id = object.object_id.clone();
+        let cloned_weak_collab = weak_collab.clone();
+        af_spawn(ObserveCollab::<Sink, Stream>::observer_collab_message(
+            origin,
+            object,
+            stream,
+            cloned_weak_collab,
+            sink,
+            seq_num,
+            last_init_sync,
+        ));
+        Self {
+            object_id,
+            weak_collab,
+            phantom_sink: Default::default(),
+            phantom_stream: Default::default(),
+        }
+    }
+
+    // spawn the stream that continuously reads the doc's updates from remote
+    async fn observer_collab_message(
+        origin: CollabOrigin,
+        object: SyncObject,
+        mut stream: Stream,
+        weak_collab: Weak<MutexCollab>,
+        weak_sink: Weak<CollabSink<Sink, ClientCollabMessage>>,
+        broadcast_seq_num: Arc<AtomicU32>,
+        last_init_sync: LastSyncTime,
+    ) {
+        while let Some(collab_message_result) = stream.next().await {
+            let collab = match weak_collab.upgrade() {
+                Some(collab) => collab,
+                None => break, // Collab dropped, stop the stream.
+            };
+            let sink = match weak_sink.upgrade() {
+                Some(sink) => sink,
+                None => break, // Sink dropped, stop the stream.
+            };
+            let msg = match collab_message_result {
+                Ok(msg) => msg,
+                Err(err) => {
+                    warn!(
+                        "Stream error: {}, stop receive incoming changes",
+                        err.into()
+                    );
+                    break;
+                },
+            };
+            if let Err(error) = ObserveCollab::<Sink, Stream>::process_message(
+                &origin,
+                &object,
+                &collab,
+                &sink,
+                msg,
+                &broadcast_seq_num,
+                &last_init_sync,
+            )
+            .await
+            {
+                if error.is_cannot_apply_update() {
+                    error!(
+                        "collab:{} can not be synced because of error: {}",
+                        object.object_id, error
+                    );
+                    break;
+                } else {
+                    error!("Error while processing message: {}", error);
+                }
+            }
+        }
+    }
 
 }
 
