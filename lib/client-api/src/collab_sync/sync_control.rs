@@ -69,7 +69,52 @@ pub fn _init_sync<E, Sink>(
     E: Into<anyhow::Error> + Send + Sync + 'static,
     Sink: SinkExt<Vec<ClientCollabMessage>, Error = E> + Send + Sync + Unpin + 'static,
 {
-    
+    let awareness = collab.get_awareness();
+    if let Some(payload) = doc_init_state(awareness, &ClientSyncProtocol) {
+        sink.queue_init_sync(|msg_id| {
+            let init_sync = InitSync::new(
+                origin,
+                sync_object.object_id.clone(),
+                sync_object.collab_type.clone(),
+                sync_object.workspace_id.clone(),
+                msg_id,
+                payload,
+            );
+            ClientCollabMessage::new_init_sync(init_sync)
+        })
+    } else {
+        sink.notify();
+    }
+}
+
+impl<Sink, Stream> Deref for SyncControl<Sink, Stream> {
+    type Target = Arc<CollabSink<Sink, ClientCollabMessage>>;
+    fn deref(&self) -> &Self::Target {
+        &self.sink
+    }
+}
+
+struct ObserveCollab<Sink, Stream> {
+    object_id: String,
+    #[allow(dead_code)]
+    weak_collab: Weak<MutexCollab>,
+    phantom_sink: PhantomData<Sink>,
+    phantom_stream: PhantomData<Stream>,
+}
+
+impl<Sink, Stream> Drop for ObserveCollab<Sink, Stream> {
+    fn drop(&mut self) {
+        trace!("Drop SyncStream {}", self.object_id);
+    }
+}
+
+impl<E, Sink, Stream> ObserveCollab<Sink, Stream>
+where
+    E: Into<anyhow::Error> + Send + Sync + 'static,
+    Sink: SinkExt<Vec<ClientCollabMessage>, Error = E> + Send + Sync + Unpin + 'static,
+    Stream: StreamExt<Item = Result<ServerCollabMessage, E>> + Send + Sync + Unpin + 'static,
+{
+
 }
 
 struct LastSyncTime {
