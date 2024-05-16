@@ -47,6 +47,31 @@ pub struct SyncControl<Sink, Stream> {
     sync_state: Arc<watch::Sender<SyncState>>,
 }
 
+fn doc_init_state<P: CollabSyncProtocol>(awareness: &Awareness, protocol: &P) -> Option<Vec<u8>> {
+    let payload = {
+        let mut encoder = EncoderV1::new();
+        protocol.start(awareness, &mut encoder).ok()?;
+        encoder.to_vec()
+    };
+    if payload.is_empty() {
+        None
+    } else {
+        Some(payload)
+    }
+}
+
+pub fn _init_sync<E, Sink>(
+    origin: CollabOrigin,
+    sync_object: &SyncObject,
+    collab: &Collab,
+    sink: &Arc<CollabSink<Sink, ClientCollabMessage>>,
+) where
+    E: Into<anyhow::Error> + Send + Sync + 'static,
+    Sink: SinkExt<Vec<ClientCollabMessage>, Error = E> + Send + Sync + Unpin + 'static,
+{
+    
+}
+
 struct LastSyncTime {
     last_sync: Mutex<Instant>,
 }
