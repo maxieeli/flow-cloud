@@ -294,6 +294,45 @@ where
         }
     }
 
+    async fn process_message(
+        origin: &CollabOrigin,
+        object: &SyncObject,
+        collab: &Arc<MutexCollab>,
+        sink: &Arc<CollabSink<Sink, ClientCollabMessage>>,
+        msg: ServerCollabMessage,
+        broadcast_seq_num: &Arc<AtomicU32>,
+        last_sync_time: &LastSyncTime,
+    ) -> Result<(), SyncError> {
+        if let ServerCollabMessage::ClientAck(ref ack) = msg {
+            if ack.code == AckCode::CannotApplyUpdate {
+                return Err(SyncError::CannotApplyUpdate(object.object_id.clone()));
+            }
+        }
+        if let ServerCollabMessage::ServerBroadcast(ref data) = msg {
+            if let Err(err) = Self::validate_broadcast(object, data, broadcast_seq_num).await {
+                info!("{}", err);
+                Self::try_init_sync(origin, object, collab, sink, last_sync_time).await;
+            }
+        }
+        let is_valid = sink.validate_response(&msg).await;
+        if is_valid && !msg.payload().is_empty() {
+            let msg_origin = msg.origin();
+            ObserveCollab::<Sink, Stream>::process_payload(
+                msg_origin,
+                msg.payload(),
+                &object.object_id,
+                collab,
+                sink,
+            )
+            .await?;
+        }
+
+        if is_valid {
+            sink.notify();
+        }
+        Ok(())   
+    }
+
 }
 
 struct LastSyncTime {
