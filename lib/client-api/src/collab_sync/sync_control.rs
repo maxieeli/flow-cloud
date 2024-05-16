@@ -47,6 +47,82 @@ pub struct SyncControl<Sink, Stream> {
     sync_state: Arc<watch::Sender<SyncState>>,
 }
 
+impl<Sink, Stream> Drop for SyncControl<Sink, Stream> {
+    fn drop(&mut self) {
+        trace!("Drop SyncQueue {}", self.object.object_id);
+    }
+}
+
+impl<E, Sink, Stream> SyncControl<Sink, Stream>
+where
+    E: Into<anyhow::Error> + Send + Sync + 'static,
+    Sink: SinkExt<Vec<ClientCollabMessage>, Error = E> + Send + Sync + Unpin + 'static,
+    Stream: StreamExt<Item = Result<ServerCollabMessage, E>> + Send + Sync + Unpin + 'static,
+{
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        object: SyncObject,
+        origin: CollabOrigin,
+        sink: Sink,
+        sink_config: SinkConfig,
+        stream: Stream,
+        collab: Weak<MutexCollab>,
+        pause: bool,
+    ) -> Self {
+        let protocol = ClientSyncProtocol;
+        let (notifier, notifier_rx) = watch::channel(SinkSignal::Proceed);
+        let sync_state = Arc::new(watch::channel(SyncState::InitSyncBegin).0);
+        let (sync_state_tx, sync_state_rx) = watch::channel(SinkState::Init);
+        debug_assert!(origin.client_user_id().is_some());
+        let sink = Arc::new(CollabSink::new(
+            origin.client_user_id().unwrap_or(0),
+            object.clone(),
+            sink,
+            notifier,
+            sync_state_tx,
+            sink_config,
+            pause,
+        ));
+        af_spawn(CollabSinkRunner::run(Arc::downgrade(&sink), notifier_rx));
+        let _cloned_protocol = protocol.clone();
+        let _object_id = object.object_id.clone();
+        let stream = ObserveCollab::new(
+            origin.clone(),
+            object.clone(),
+            stream,
+            collab.clone(),
+            Arc::downgrade(&sink),
+        );
+        let weak_sync_state = Arc::downgrade(&sync_state);
+        let mut sink_state_stream = WatchStream::new(sink_state_rx);
+        af_spawn(async move {
+            while let Some(collab_state) = sink_state_stream.next().await {
+                if let Some(sync_state) = weak_sync_state.upgrade() {
+                    match collab_state {
+                        SinkState::Syncing => {
+                            let _ = sync_state.send(SyncState::Syncing);
+                        },
+                        SinkState::Finished => {
+                            let _ = sync_state.send(SyncState::SyncFinished);
+                        },
+                        SinkState::Init => {
+                            let _ = sync_state.send(SyncState::InitSyncBegin);
+                        },
+                        SinkState::Pause => {},
+                    }
+                }
+            }
+        });
+        Self {
+            object,
+            origin,
+            sink,
+            observe_collab: stream,
+            sync_state,        
+        }
+    }
+}
+
 fn doc_init_state<P: CollabSyncProtocol>(awareness: &Awareness, protocol: &P) -> Option<Vec<u8>> {
     let payload = {
         let mut encoder = EncoderV1::new();
