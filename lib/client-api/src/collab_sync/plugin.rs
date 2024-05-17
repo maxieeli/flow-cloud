@@ -1,4 +1,5 @@
 use collab::core::awareness::{AwarenessUpdate, Event};
+use yrs::block::Item;
 use std::sync::{Arc, Weak};
 
 use collab::core::collab::MutexCollab;
@@ -115,6 +116,17 @@ where
     }
 }
 
+impl<E, Sink, Stream, C> CollabPlugin for SyncPlugin<Sink, Stream, C>
+where
+    E: Into<anyhow::Error> + Send + Sync + 'static,
+    Sink: SinkExt<Vec<ClientCollabMessage>, Error = E> + Send + Sync + Unpin + 'static,
+    Stream: StreamExt<Item = Result<ServerCollabMessage, E>> + Send + Sync + Unpin + 'static,
+    C: Send + Sync + 'static,
+{
+    fn did_init(&self, collab: &Collab, _object_id: &str, _last_sync_at:i64) {
+        self.sync_queue.init_sync(collab);
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct SyncObject {
