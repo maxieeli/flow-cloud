@@ -333,6 +333,50 @@ where
         Ok(())   
     }
 
+    async fn try_init_sync(
+        origin: &CollabOrigin,
+        object: &SyncObject,
+        collab: &Arc<MutexCollab>,
+        sink: &Arc<CollabSink<Sink, ClientCollabMessage>>,
+        last_sync_time: &LastSyncTime,
+    ) {
+        let debounce_duration = if cfg!(debug_assertions) {
+            Duration::from_secs(2)
+        } else {
+            DEBOUNCE_DURATION
+        };
+        if sink.can_queue_init_sync() && last_sync_time.should_sync(debounce_duration).await {
+            if let Some(lock_guard) = collab.try_lock() {
+                _init_sync(origin.clone(), object, &lock_guard, sink);
+            }
+        }
+    }
+
+    async fn validate_broadcast(
+        object: &SyncObject,
+        broadcast_sync: &BroadcastSync,
+        broadcast_seq_num: &Arc<AtomicU32>,
+    ) -> Result<(), SyncError> {
+        let prev_seq_num = broadcast_seq_num.load(Ordering::SeqCst);
+        broadcast_seq_num.store(broadcast_sync.seq_num, Ordering::SeqCst);
+        trace!(
+            "receive {} broadcast data, current: {}, prev: {}",
+            object.object_id,
+            broadcast_sync.seq_num,
+            prev_seq_num
+        );
+        // check if the received seq_num indicates missing updates
+        if broadcast_sync.seq_num > prev_seq_num + NUMBER_OF_UPDATE_TRIGGER_INIT_SYNC {
+            return Err(SyncError::MissingBroadcast(format!(
+                "{} missing updates len: {}, start init sync",
+                object.object_id,
+                broadcast_sync.seq_num - prev_seq_num,
+            )));
+        }
+        Ok(())
+    }
+
+
 }
 
 struct LastSyncTime {
