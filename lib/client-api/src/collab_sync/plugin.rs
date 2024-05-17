@@ -126,6 +126,38 @@ where
     fn did_init(&self, collab: &Collab, _object_id: &str, _last_sync_at:i64) {
         self.sync_queue.init_sync(collab);
     }
+    fn receive_local_state(&self, origin: &CollabOrigin, _object_id: &str, update: &[u8]) {
+        let update = update.to_vec();
+        let payload = Message::Sync(SyncMessage::Update(update)).encode_v1();
+        self.sync_queue.queue_msg(|msg_id| {
+            let update_sync = UpdateSync::new(
+                origin.clone(),
+                self.object.object_id.clone(),
+                payload,
+                msg_id,
+            );
+            ClientCollabMessage::new_update_sync(update_sync)
+        });
+    }
+
+    fn receive_local_update(
+        &self,
+        origin: &CollabOrigin,
+        object_id: &str,
+        _event: &Event,
+        update: &AwarenessUpdate,
+    ) {
+        let payload = Message::Awareness(update.clone()).encode_v1();
+        self.sync_queue.queue_msg(|msg_id| {
+            let update_sync = UpdateSync::new(origin.clone(), object_id.to_string(), payload, msg_id);
+            trace!("queue local state: {}", update_sync);
+            ClientCollabMessage::new_update_sync(update_sync)
+        });
+    }
+
+    fn reset(&self, _object_id: &str) {
+        self.sync_queue.clear();
+    }
 }
 
 #[derive(Clone, Debug)]
