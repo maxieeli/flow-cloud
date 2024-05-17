@@ -20,7 +20,7 @@ impl CollabStream {
 
     /// inserts a single message into the redis stream
     pub async fn insert_message(&mut self, message: Message) -> Result<MessageId, StreamError> {
-        let tuple = message.into_tuple_array()
+        let tuple = message.into_tuple_array();
         let message_id = self
             .connection_manager
             .xadd(&self.stream_key, "*", tuple.as_slice())

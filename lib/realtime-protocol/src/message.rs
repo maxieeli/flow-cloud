@@ -129,7 +129,7 @@ impl Decode for CustomMessage {
                 let meta = SyncMeta::from_vec(buf)?;
                 Ok(CustomMessage::SyncCheck(meta))
             },
-            _ => Err(yrs::encoding::read:;Error::UnexpectedValue),
+            _ => Err(yrs::encoding::read::Error::UnexpectedValue),
         }
     }
 }

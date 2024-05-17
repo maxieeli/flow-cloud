@@ -41,7 +41,7 @@ impl Snowflake {
 
     fn wait_next_millis(&self) {
         let mut timestamp = self.timestamp();
-        while timestamp == self.last_timestamp() {
+        while timestamp == self.last_timestamp {
             timestamp = self.timestamp();
         }
     }

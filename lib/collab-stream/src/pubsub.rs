@@ -9,7 +9,7 @@ use tracing::instrument;
 
 const ACTIVE_COLLAB_CHANNEL: &str = "active_collab_channel";
 
-pub struct CollabStreamPub {
+pub struct CollabStreamSub {
     #[allow(deprecated)]
     conn: Connection,
 }
@@ -31,7 +31,7 @@ impl CollabStreamSub {
                 let payload = msg.get_payload_bytes();
                 PubSubMessage::from_vec(payload)
             })
-            .boxed()
+            .boxed();
         Ok(message_stream)
     }
 }
@@ -39,7 +39,7 @@ impl CollabStreamSub {
 pub struct CollabStreamPub {
     conn: ConnectionManager,
 }
-
+  
 impl CollabStreamPub {
     pub fn new(conn: ConnectionManager) -> Self {
         Self { conn }
