@@ -9,7 +9,7 @@ pub struct SignInParams {
 }
 
 #[derive(Default, Deserialize, Serialize, Clone)]
-pub struct UserMetaData(HashMap<String, serde_json::Value);
+pub struct UserMetaData(HashMap<String, serde_json::Value>);
 
 impl UserMetaData {
     pub fn new() -> Self {
