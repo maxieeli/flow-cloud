@@ -60,7 +60,31 @@ pub struct ClientConfiguration {
     pub(crate) compression_buffer_size: usize,
 }
 
-impl ClientConfiguration {}
+impl ClientConfiguration {
+    pub fn with_compression_buffer_size(mut self, compression_buffer_size: usize) -> Self {
+        self.compression_buffer_size = compression_buffer_size;
+        self
+    }
+    pub fn with_compression_quality(mut self, compression_quality: u32) -> Self {
+        self.compression_quality = if compression_quality > 11 {
+            warn!("compression_quality is larger than 11, set it to 11");
+            11
+        } else {
+            compression_quality
+        };
+        self
+    }
+}
+
+impl Default for ClientConfiguration {
+    fn default() -> Self {
+        Self {
+            compression_quality: 8,
+            compression_buffer_size: 10240,
+        }
+    }
+}
+
 
 #[derive(Clone)]
 pub struct Client {
