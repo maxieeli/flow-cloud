@@ -18,7 +18,7 @@ impl JsonToDocumentParser {
         // the root's parent id is empty
         let (blocks, text_map) = Self::generate_blocks(&root, Some(page_id.clone()), "".to_string());
         // generate the children map
-        let children_map = Self::generate_children_map(&blocks)
+        let children_map = Self::generate_children_map(&blocks);
         // generate the text map
         let text_map = Self::generate_text_map(&text_map);
         Ok(DocumentData {
@@ -39,7 +39,7 @@ impl JsonToDocumentParser {
         let (block_pb, delta) = Self::block_to_block_pb(block, id, parent_id);
         let mut blocks = IndexMap::new();
         let mut text_map = IndexMap::new();
-        for child for &block.children {
+        for child in &block.children {
             let (child_blocks, child_blocks_text_map) =
                 Self::generate_blocks(child, None, block_pb.id.clone());
             blocks.extend(child_blocks);

@@ -31,7 +31,7 @@ pub struct TemplateData {
     pub object_data: EncodedCollab,
 }
 
-pub type WorkspaceTemplateHandlers = HashMap<ViewLayout, Arc<dync WorkspaceTemplate + Send + Sync>>;
+pub type WorkspaceTemplateHandlers = HashMap<ViewLayout, Arc<dyn WorkspaceTemplate + Send + Sync>>;
 
 /// a builder for creating a workspace template
 /// workspace template is a set of views that are created when a workspace is created

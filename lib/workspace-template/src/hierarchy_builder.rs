@@ -4,8 +4,8 @@ use collab_folder::{
 };
 use std::future::Future;
 
-/// a builder for creating a view for a workspace
-/// the views created by this builder will be the first level views of the workspace
+/// A builder for creating a view for a workspace.
+/// The views created by this builder will be the first level views of the workspace.
 pub struct WorkspaceViewBuilder {
     pub uid: i64,
     pub workspace_id: String,
@@ -20,6 +20,7 @@ impl WorkspaceViewBuilder {
             views: vec![],
         }
     }
+
     pub async fn with_view_builder<F, O>(&mut self, view_builder: F) -> String
     where
         F: Fn(ViewBuilder) -> O,
@@ -36,8 +37,8 @@ impl WorkspaceViewBuilder {
     }
 }
 
-/// A builder for creating a view
-/// the default layout of the view is [ViewLayout::Document]
+/// A builder for creating a view.
+/// The default layout of the view is [ViewLayout::Document]
 pub struct ViewBuilder {
     uid: i64,
     parent_view_id: String,
@@ -86,8 +87,9 @@ impl ViewBuilder {
         });
         self
     }
-    /// create a child view for the current view
-    /// the view created by this builder will the next level view of the current view
+
+    /// Create a child view for the current view.
+    /// The view created by this builder will be the next level view of the current view.
     pub async fn with_child_view_builder<F, O>(mut self, child_view_builder: F) -> Self
     where
         F: Fn(ViewBuilder) -> O,
@@ -98,7 +100,7 @@ impl ViewBuilder {
         self
     }
 
-    pub fn build(&self) -> ParentChildViews {
+    pub fn build(self) -> ParentChildViews {
         let view = View {
             id: self.view_id,
             parent_view_id: self.parent_view_id,
@@ -111,7 +113,7 @@ impl ViewBuilder {
             created_by: Some(self.uid),
             last_edited_time: 0,
             children: RepeatedViewIdentifier::new(
-                self
+            self
                     .child_views
                     .iter()
                     .map(|v| ViewIdentifier {
