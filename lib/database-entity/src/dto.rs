@@ -42,7 +42,7 @@ impl CreateCollabParams {
                 object_id: self.object_id,
                 encoded_collab_v1: self.encoded_collab_v1,
                 collab_type: self.collab_type,
-                override_if_exist: self.override_collab_if_exist,
+                override_if_exist: self.override_if_exist,
             },
             self.workspace_id,
         )

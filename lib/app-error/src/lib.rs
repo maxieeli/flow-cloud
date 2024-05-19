@@ -113,18 +113,19 @@ impl AppError {
     pub fn is_not_enough_permissions(&self) -> bool {
         matches!(self, AppError::NotEnoughPermissions { .. })
     }
+
     pub fn is_record_not_found(&self) -> bool {
         matches!(self, AppError::RecordNotFound(_))
     }
-    
+
     pub fn is_network_error(&self) -> bool {
         matches!(self, AppError::Connect(_) | AppError::RequestTimeout(_))
     }
-    
+
     pub fn is_unauthorized(&self) -> bool {
         matches!(self, AppError::UserUnAuthorized(_))
     }
-    
+
     pub fn code(&self) -> ErrorCode {
         match self {
             AppError::Ok => ErrorCode::Ok,
@@ -184,6 +185,7 @@ impl From<reqwest::Error> for AppError {
                 AppError::InvalidRequest(error.to_string())
             };
         }
+        AppError::Unhandled(error.to_string())
     }
 }
 
