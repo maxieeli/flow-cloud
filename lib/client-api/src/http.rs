@@ -372,6 +372,92 @@ impl Client {
         self.token.clone()
     }
 
+    /// Retrieves the expiration timestamp of the current token.
+    /// This function attempts to read the current token and, if successful, returns the expiration timestamp.
+    /// # Returns
+    /// - `Ok(i64)`: An `i64` representing the expiration timestamp of the token in seconds.
+    /// - `Err(AppError)`: An `AppError` indicating either an inability to read the token or that the user is not logged in.
+    #[inline]
+    pub fn token_expires_at(&self) -> Result<i64, AppResponseError> {
+        match &self.token.try_read() {
+            None => Err(AppError::Unhandled("Failed to read token".to_string()).into()),
+            Some(token) => Ok(
+                token
+                .as_ref()
+                .ok_or(AppResponseError::from(AppError::NotLoggedIn(
+                    "token is empty".to_string(),
+                )))?
+                .expires_at,
+            ),
+        }
+    }
+
+    /// Retrieves the access token string.
+    /// This function attempts to read the current token and, if successful, returns the access token string.
+    /// # Returns
+    /// - `Ok(String)`: A `String` containing the access token.
+    /// - `Err(AppResponseError)`: An `AppResponseError` indicating either an inability to read the token or that the user is not logged in.
+    pub fn access_token(&self) -> Result<String, AppResponseError> {
+        match &self.token.try_read_for(Duration::from_secs(2)) {
+            None => Err(AppError::Unhandled("Failed to read token".to_string()).into()),
+            Some(token) => {
+                let access_token = token
+                    .as_ref()
+                    .ok_or(AppResponseError::from(AppError::NotLoggedIn(
+                        "fail to get access token. Token is empty".to_string(),
+                    )))?
+                    .access_token
+                    .clone();
+    
+                if access_token.is_empty() {
+                    error!("Unexpected empty access token");
+                }
+                Ok(access_token)
+            },
+        }
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn get_profile(&self) -> Result<AFUserProfile, AppResponseError> {
+        let url = format!("{}/api/user/profile", self.base_url);
+        let resp = self
+            .http_client_with_auth(Method::GET, &url)
+            .await?
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<AFUserProfile>::from_response(resp)
+            .await?
+            .into_data()
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn get_user_workspace_info(&self) -> Result<AFUserWorkspaceInfo, AppResponseError> {
+        let url = format!("{}/api/user/workspace", self.base_url);
+        let resp = self
+            .http_client_with_auth(Method::GET, &url)
+            .await?
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<AFUserWorkspaceInfo>::from_response(resp)
+            .await?
+            .into_data()
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn delete_workspace(&self, workspace_id: &str) -> Result<(), AppResponseError> {
+        let url = format!("{}/api/workspace/{}", self.base_url, workspace_id);
+        let resp = self
+            .http_client_with_auth(Method::DELETE, &url)
+            .await?
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<()>::from_response(resp).await?.into_error()?;
+        Ok(())
+    }
+
 }
 
 impl Display for Client {
