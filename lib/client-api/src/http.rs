@@ -105,7 +105,111 @@ pub(crate) type RefreshTokenSender = tokio::sync::oneshot::Sender<Result<(), App
 /// Hardcoded schema in the frontend application. Do not change this value.
 const DESKTOP_CALLBACK_URL: &str = "appflow-flutter://login-callback";
 
-impl Client {}
+impl Client {
+    /// Constructs a new `Client` instance.
+    pub fn new(
+        base_url: &str,
+        ws_addr: &str,
+        gotrue_url: &str,
+        device_id: &str,
+        config: ClientConfiguration,
+        client_id: &str,
+    ) -> Self {
+        let reqwest_client = reqwest::Client::new();
+        let client_version = Version::parse(client_id).unwrap_or_else(|_| Version::new(0, 5, 0));
+        Self {
+            base_url: base_url.to_string(),
+            ws_addr: ws_addr.to_string(),
+            cloud_client: reqwest_client.clone(),
+            gotrue_client: gotrue::api::Client::new(reqwest_client, gotrue_url),
+            token: Arc::new(RwLock::new(ClientToken::new())),
+            is_refreshing_token: Default::default(),
+            refresh_ret_txs: Default::default(),
+            config,
+            device_id: device_id.to_string(),
+            client_version,
+        }
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+    pub fn ws_addr(&self) -> &str {
+        &self.ws_addr
+    }
+    pub fn gotrue_url(&self) -> &str {
+        &self.gotrue_client.base_url
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub fn restore_token(&self, token: &str) -> Result<(), AppResponseError> {
+        match serde_json::from_str::<GotrueTokenResponse>(token) {
+            Ok(token) => {
+                self.token.write().set(token);
+                Ok(())
+            },
+            Err(err) => {
+                error!("fail to deserialize token:{}, error:{}", token, err);
+                Err(err.into())
+            },
+        }
+    }
+
+    /// Retrieves the string representation of the [GotrueTokenResponse]. The returned value can be
+    /// saved to the client application's local storage and used to restore the client's authentication
+    /// This function attempts to acquire a read lock on `self.token` and retrieves the
+    /// string representation of the access token. If the lock cannot be acquired or
+    /// the token is not present, an error is returned.
+    #[instrument(level = "debug", skip_all, err)]
+    pub fn get_token(&self) -> Result<String, AppResponseError> {
+        let token_str = self
+            .token
+            .read()
+            .try_get()
+            .map_err(|err| AppResponseError::from(AppError::OAuthError(err.to_string())))?;
+        Ok(token_str)
+    }
+
+    pub fn subscribe_token_state(&self) -> TokenStateReceiver {
+        self.token.read().subscribe()
+    }
+
+    /// Attempts to sign in using a URL, extracting refresh_token from the URL.
+    /// It looks like, e.g., `appflow-flutter://#access_token=...&expires_in=3600&provider_token=...&refresh_token=...&token_type=bearer`.
+    /// return a bool indicating if the user is new
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn sign_in_with_url(&self, url: &str) -> Result<bool, AppResponseError> {
+        let parsed = Url::parse(url)?;
+        let key_value_pairs = parsed
+            .fragment()
+            .ok_or(url_missing_param("fragment"))?
+            .split('&');
+        let mut refresh_token: Option<&str> = None;
+        for param in key_value_pairs {
+            match param.split_once('=') {
+                Some(pair) => {
+                    let (k, v) = pair;
+                    if k == "refresh_token" {
+                        refresh_token = Some(v);
+                        break;
+                    }
+                },
+                None => warn!("param is not in key=value format: {}", param),
+            }
+        }
+        let refresh_token = refresh_token.ok_or(url_missing_param("refresh_token"))?;
+        let new_token = self
+            .gotrue_client
+            .token(&Grant::RefreshToken(RefreshTokenGrant {
+                refresh_token: refresh_token.to_owned(),
+            }))
+            .await?;
+        let (_user, new) = self.verify_token(&new_token.access_token).await?;
+        self.token.write().set(new_token);
+        Ok(new)
+    }
+
+}
 
 impl Display for Client {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
