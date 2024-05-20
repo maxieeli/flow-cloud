@@ -260,6 +260,118 @@ impl Client {
         Ok(link_resp.action_link)
     }
 
+    #[cfg(feature = "test_util")]
+    /// Used to extract the sign in url from the action link
+    /// Only expose this method for testing
+    pub async fn extract_sign_in_url(&self, action_link: &str) -> Result<String, AppResponseError> {
+        let resp = reqwest::Client::new().get(action_link).send().await?;
+        let html = resp.text().await.unwrap();
+        trace!("action_link:{}, html: {}", action_link, html);
+        let fragment = scraper::Html::parse_fragment(&html);
+        let selector = scraper::Selector::parse("a").unwrap();
+        let sign_in_url = fragment
+            .select(&selector)
+            .next()
+            .unwrap()
+            .value()
+            .attr("href")
+            .unwrap()
+            .to_string();
+        Ok(sign_in_url)
+    }
+
+    #[inline]
+    #[instrument(level = "debug", skip_all, err)]
+    async fn verify_token(&self, access_token: &str) -> Result<(User, bool), AppResponseError> {
+        let user = self.gotrue_client.user_info(access_token).await?;
+        let is_new = self.verify_token_cloud(access_token).await?;
+        Ok((user, is_new))
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    #[inline]
+    async fn verify_token_cloud(&self, access_token: &str) -> Result<bool, AppResponseError> {
+        let url = format!("{}/api/user/verify/{}", self.base_url, access_token);
+        let resp = self.cloud_client.get(&url).send().await?;
+        let sign_in_resp: SignInTokenResponse = AppResponse::from_response(resp).await?.into_data()?;
+        Ok(sign_in_resp.is_new)
+    }
+
+    // Invites another user by sending a magic link to the user's email address.
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn invite(&self, email: &str) -> Result<(), AppResponseError> {
+        self
+            .gotrue_client
+            .magic_link(
+                &MagicLinkParams {
+                    email: email.to_owned(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn create_user(&self, email: &str, password: &str) -> Result<User, AppResponseError> {
+        Ok(
+            self
+                .gotrue_client
+                .admin_add_user(
+                    &self.access_token()?,
+                    &AdminUserParams {
+                        email: email.to_owned(),
+                        password: Some(password.to_owned()),
+                        email_confirm: true,
+                        ..Default::default()
+                    },
+                )
+                .await?,
+        )
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn create_email_verified_user(
+        &self,
+        email: &str,
+        password: &str,
+    ) -> Result<User, AppResponseError> {
+        Ok(
+            self
+                .gotrue_client
+                .admin_add_user(
+                    &self.access_token()?,
+                    &AdminUserParams {
+                        email: email.to_owned(),
+                        password: Some(password.to_owned()),
+                        email_confirm: true,
+                        ..Default::default()
+                    },
+                )
+                .await?,
+        )
+    }
+
+    // filter is postgre sql like filter
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn admin_list_users(
+        &self,
+        filter: Option<&str>,
+    ) -> Result<Vec<User>, AppResponseError> {
+        let user = self
+            .gotrue_client
+            .admin_list_user(&self.access_token()?, filter)
+            .await?;
+        Ok(user.users)
+    }
+
+    /// Only expose this method for testing
+    #[cfg(debug_assertions)]
+    pub fn token(&self) -> Arc<RwLock<ClientToken>> {
+        self.token.clone()
+    }
+
 }
 
 impl Display for Client {
