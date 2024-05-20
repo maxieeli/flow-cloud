@@ -209,6 +209,57 @@ impl Client {
         Ok(new)
     }
 
+    /// Returns an OAuth URL by constructing the authorization URL for the specified provider.
+    /// This asynchronous function communicates with the GoTrue client to retrieve settings and
+    /// validate the availability of the specified OAuth provider. If the provider is available,
+    /// it constructs and returns the OAuth URL. When the user opens the OAuth URL, it redirects to
+    /// the corresponding provider's OAuth web page. After the user is authenticated, the browser will open
+    /// a deep link to the AppFlow app (iOS, macOS, etc.), which will call [Client::sign_in_with_url] to sign in.
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn generate_oauth_url_with_provider(
+        &self,
+        provider: &AuthProvider,
+    ) -> Result<String, AppResponseError> {
+        let settings = self.gotrue_client.settings().await?;
+        if !settings.external.has_provider(provider) {
+            return Err(AppError::InvalidOAuthProvider(provider.as_str().to_owned()).into());
+        }
+        let url = format!("{}/authorize", self.gotrue_client.base_url,);
+        let mut url = Url::parse(&url)?;
+        url
+            .query_pairs_mut()
+            .append_pair("provider", provider.as_str())
+            .append_pair("redirect_to", DESKTOP_CALLBACK_URL);
+        if let AuthProvider::Google = provider {
+            url
+                .query_pairs_mut()
+                .append_pair("access_type", "offline")
+                .append_pair("prompt", "consent");
+        }
+        Ok(url.to_string())
+    }
+
+    /// Generates a sign action link for the specified email address.
+    /// This is only applicable if user token is with admin privilege.
+    /// This action link is used on web browser to sign in. When user then click the action link in the browser,
+    /// which calls gotrue authentication server, which then redirects to the appflowy-flutter:// with the authentication token.
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn generate_sign_in_action_link(
+        &self,
+        email: &str,
+    ) -> Result<String, AppResponseError> {
+        let admin_user_params: GenerateLinkParams = GenerateLinkParams {
+            email: email.to_string(),
+            ..Default::default()
+        };
+        let link_resp = self
+            .gotrue_client
+            .admin_generate_link(&self.access_token()?, &admin_user_params)
+            .await?;
+        assert_eq!(link_resp.email, email);
+        Ok(link_resp.action_link)
+    }
+
 }
 
 impl Display for Client {
