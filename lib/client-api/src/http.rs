@@ -1028,8 +1028,212 @@ impl Client {
         )
     }
 
-    
+    pub async fn put_blob<T: Into<Bytes>>(
+        &self,
+        url: &str,
+        data: T,
+        mime: &Mime,
+    ) -> Result<(), AppResponseError> {
+        let data = data.into();
+        let resp = self
+            .http_client_with_auth(Method::PUT, url)
+            .await?
+            .header(header::CONTENT_TYPE, mime.to_string())
+            .body(data)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        if resp.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            return Err(AppResponseError::from(AppError::PayloadTooLarge(
+                StatusCode::PAYLOAD_TOO_LARGE.to_string(),
+            )));
+        }
+        AppResponse::<()>::from_response(resp).await?.into_error()
+    }
 
+    /// Only expose this method for testing
+    #[cfg(debug_assertions)]
+    pub async fn put_blob_with_content_length<T: Into<Bytes>>(
+        &self,
+        url: &str,
+        data: T,
+        mime: &Mime,
+        content_length: usize,
+    ) -> Result<crate::entity::AFBlobRecord, AppResponseError> {
+        let resp = self
+            .http_client_with_auth(Method::PUT, url)
+            .await?
+            .header(header::CONTENT_TYPE, mime.to_string())
+            .header(header::CONTENT_LENGTH, content_length)
+            .body(data.into())
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<crate::entity::AFBlobRecord>::from_response(resp)
+            .await?
+            .into_data()
+    }
+
+    /// Get the file with the given url. The url should be in the format of
+    /// `https://appflow.io/api/file_storage/<workspace_id>/<file_id>`.
+    pub async fn get_blob(&self, url: &str) -> Result<(Mime, Vec<u8>), AppResponseError> {
+        let resp = self
+            .http_client_with_auth(Method::GET, url)
+            .await?
+            .send()
+            .await?;
+        log_request_id(&resp);
+        match resp.status() {
+            reqwest::StatusCode::OK => {
+                let mime = {
+                    match resp.headers().get(header::CONTENT_TYPE) {
+                        Some(v) => match v.to_str() {
+                            Ok(v) => match v.parse::<Mime>() {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    tracing::error!("failed to parse mime from header: {:?}", e);
+                                    mime::TEXT_PLAIN
+                                },
+                            },
+                            Err(e) => {
+                                tracing::error!("failed to get mime from header: {:?}", e);
+                                mime::TEXT_PLAIN
+                            },
+                        },
+                        None => mime::TEXT_PLAIN,
+                    }
+                };
+                let mut stream = resp.bytes_stream();
+                let mut acc: Vec<u8> = Vec::new();
+                while let Some(raw_bytes) = stream.next().await {
+                    acc.extend_from_slice(&raw_bytes?);
+                }
+                Ok((mime, acc))
+            },
+            reqwest::StatusCode::NOT_FOUND => Err(AppResponseError::from(AppError::RecordNotFound(
+                url.to_owned(),
+            ))),
+            c => Err(AppResponseError::from(AppError::Unhandled(format!(
+                "status code: {}, message: {}",
+                c,
+                resp.text().await?
+            )))),
+        }
+    }
+
+    pub async fn get_blob_metadata(&self, url: &str) -> Result<BlobMetadata, AppResponseError> {
+        let resp = self
+            .http_client_with_auth(Method::GET, url)
+            .await?
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<BlobMetadata>::from_response(resp)
+            .await?
+            .into_data()
+    }
+
+    pub async fn delete_blob(&self, url: &str) -> Result<(), AppResponseError> {
+        let resp = self
+            .http_client_with_auth(Method::DELETE, url)
+            .await?
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<()>::from_response(resp).await?.into_error()
+    }
+
+    pub async fn get_workspace_usage(
+        &self,
+        workspace_id: &str,
+    ) -> Result<WorkspaceSpaceUsage, AppResponseError> {
+        let url = format!("{}/api/file_storage/{}/usage", self.base_url, workspace_id);
+        let resp = self
+            .http_client_with_auth(Method::GET, &url)
+            .await?
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<WorkspaceSpaceUsage>::from_response(resp)
+            .await?
+            .into_data()
+    }
+
+    pub async fn get_workspace_all_blob_metadata(
+        &self,
+        workspace_id: &str,
+    ) -> Result<RepeatedBlobMetaData, AppResponseError> {
+        let url = format!("{}/api/file_storage/{}/blobs", self.base_url, workspace_id);
+        let resp = self
+            .http_client_with_auth(Method::GET, &url)
+            .await?
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<RepeatedBlobMetaData>::from_response(resp)
+            .await?
+            .into_data()
+    }
+
+    // Refresh token if given timestamp is close to the token expiration time
+    pub async fn refresh_if_expired(&self, ts: i64) -> Result<(), AppResponseError> {
+        let expires_at = self.token_expires_at()?;
+        if ts + 30 > expires_at { 
+            info!("token is about to expire, refreshing token");
+            // Add 30 seconds buffer
+            self.refresh_token().await?;
+        }
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn http_client_with_auth(
+        &self,
+        method: Method,
+        url: &str,
+    ) -> Result<RequestBuilder, AppResponseError> {
+        let ts_now = chrono::Local::now().timestamp();
+        self.refresh_if_expired(ts_now).await?;
+        let access_token = self.access_token()?;
+        trace!("start request: {}, method: {}", url, method);
+        let request_builder = self
+            .cloud_client
+            .request(method, url)
+            .header("client-version", self.client_version.to_string())
+            .header("client-timestamp", ts_now.to_string())
+            .header("device_id", self.device_id.clone())
+            .bearer_auth(access_token);
+        Ok(request_builder)
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub(crate) async fn http_client_with_auth_compress(
+        &self,
+        method: Method,
+        url: &str,
+    ) -> Result<RequestBuilder, AppResponseError> {
+        self
+            .http_client_with_auth(method, url)
+            .await
+            .map(|builder| {
+                builder
+                    .header(
+                        X_COMPRESSION_TYPE,
+                        HeaderValue::from_static(X_COMPRESSION_TYPE_BROTLI),
+                    )
+                    .header(
+                        X_COMPRESSION_BUFFER_SIZE,
+                        HeaderValue::from(self.config.compression_buffer_size),
+                    )
+            })
+    }
+
+    pub(crate) fn batch_create_collab_url(&self, workspace_id: &str) -> String {
+        format!(
+            "{}/api/workspace/{}/batch/collab",
+            self.base_url, workspace_id
+        )
+    }
 }
 
 impl Display for Client {
