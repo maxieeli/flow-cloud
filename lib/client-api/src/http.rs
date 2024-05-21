@@ -691,6 +691,345 @@ impl Client {
         Ok(is_new)
     }
 
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn sign_up(&self, email: &str, password: &str) -> Result<(), AppResponseError> {
+        match self.gotrue_client.sign_up(email, password, None).await? {
+            Authenticated(access_token_resp) => {
+                self.token.write().set(access_token_resp);
+                Ok(())
+            },
+            NotAuthenticated(user) => {
+                tracing::info!("sign_up but not authenticated: {}", user.email);
+                Ok(())
+            },
+        }
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub async fn sign_out(&self) -> Result<(), AppResponseError> {
+        self.gotrue_client.logout(&self.access_token()?).await?;
+        self.token.write().unset();
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn update_user(&self, params: UpdateUserParams) -> Result<(), AppResponseError> {
+        let gotrue_params = UpdateGotrueUserParams::new()
+            .with_opt_email(params.email.clone())
+            .with_opt_password(params.password.clone());
+  
+        let updated_user = self
+            .gotrue_client
+            .update_user(&self.access_token()?, &gotrue_params)
+            .await?;
+  
+        if let Some(token) = self.token.write().as_mut() {
+            token.user = updated_user;
+        }
+        let url = format!("{}/api/user/update", self.base_url);
+        let resp = self
+            .http_client_with_auth(Method::POST, &url)
+            .await?
+            .json(&params)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<()>::from_response(resp).await?.into_error()
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn create_collab(&self, params: CreateCollabParams) -> Result<(), AppResponseError> {
+        let url = format!(
+            "{}/api/workspace/{}/collab/{}",
+            self.base_url, params.workspace_id, &params.object_id
+        );
+        let bytes = params
+            .to_bytes()
+            .map_err(|err| AppError::Internal(err.into()))?;
+        let compress_bytes = spawn_blocking_brotli_compress(
+            bytes,
+            self.config.compression_quality,
+            self.config.compression_buffer_size,
+        )
+        .await?;
+
+        #[allow(unused_mut)]
+        let mut builder = self
+            .http_client_with_auth_compress(Method::POST, &url)
+            .await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            builder = builder.timeout(Duration::from_secs(60));
+        }
+        let resp = builder.body(compress_bytes).send().await?;
+        log_request_id(&resp);
+        AppResponse::<()>::from_response(resp).await?.into_error()
+    }
+
+    pub async fn get_snapshot_list(
+        &self,
+        workspace_id: &str,
+        object_id: &str,
+    ) -> Result<AFSnapshotMetas, AppResponseError> {
+        let url = format!(
+            "{}/api/workspace/{}/{}/snapshot/list",
+            self.base_url, workspace_id, object_id
+        );
+        let resp = self
+            .http_client_with_auth(Method::GET, &url)
+            .await?
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<AFSnapshotMetas>::from_response(resp)
+            .await?
+            .into_data()
+    }
+
+    pub async fn get_snapshot(
+        &self,
+        workspace_id: &str,
+        object_id: &str,
+        params: QuerySnapshotParams,
+    ) -> Result<SnapshotData, AppResponseError> {
+        let url = format!(
+            "{}/api/workspace/{}/{}/snapshot",
+            self.base_url, workspace_id, object_id,
+        );
+        let resp = self
+            .http_client_with_auth(Method::GET, &url)
+            .await?
+            .json(&params)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<SnapshotData>::from_response(resp)
+            .await?
+            .into_data()
+    }
+
+    pub async fn create_snapshot(
+        &self,
+        workspace_id: &str,
+        object_id: &str,
+        collab_type: CollabType,
+    ) -> Result<AFSnapshotMeta, AppResponseError> {
+        let url = format!(
+            "{}/api/workspace/{}/{}/snapshot",
+            self.base_url, workspace_id, object_id,
+        );
+        let resp = self
+            .http_client_with_auth(Method::POST, &url)
+            .await?
+            .json(&collab_type)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<AFSnapshotMeta>::from_response(resp)
+            .await?
+            .into_data()
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn update_collab(&self, params: CreateCollabParams) -> Result<(), AppResponseError> {
+        let url = format!(
+            "{}/api/workspace/{}/collab/{}",
+            self.base_url, &params.workspace_id, &params.object_id
+        );
+        let resp = self
+            .http_client_with_auth(Method::PUT, &url)
+            .await?
+            .json(&params)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<()>::from_response(resp).await?.into_error()
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub async fn get_collab(
+        &self,
+        params: QueryCollabParams,
+    ) -> Result<EncodedCollab, AppResponseError> {
+        let url = format!(
+            "{}/api/workspace/{}/collab/{}",
+            self.base_url, &params.workspace_id, &params.object_id
+        );
+        let resp = self
+            .http_client_with_auth(Method::GET, &url)
+            .await?
+            .json(&params)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<EncodedCollab>::from_response(resp)
+            .await?
+            .into_data()
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn batch_get_collab(
+        &self,
+        workspace_id: &str,
+        params: Vec<QueryCollab>,
+    ) -> Result<BatchQueryCollabResult, AppResponseError> {
+        let url = format!(
+            "{}/api/workspace/{}/collab_list",
+            self.base_url, workspace_id
+        );
+        let params = BatchQueryCollabParams(params);
+        let resp = self
+            .http_client_with_auth(Method::GET, &url)
+            .await?
+            .json(&params)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<BatchQueryCollabResult>::from_response(resp)
+            .await?
+            .into_data()
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn delete_collab(&self, params: DeleteCollabParams) -> Result<(), AppResponseError> {
+        let url = format!(
+            "{}/api/workspace/{}/collab/{}",
+            self.base_url, &params.workspace_id, &params.object_id
+        );
+        let resp = self
+            .http_client_with_auth(Method::DELETE, &url)
+            .await?
+            .json(&params)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<()>::from_response(resp).await?.into_error()
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn add_collab_member(
+        &self,
+        params: InsertCollabMemberParams,
+    ) -> Result<(), AppResponseError> {
+        let url = format!(
+            "{}/api/workspace/{}/collab/{}/member",
+            self.base_url, params.workspace_id, &params.object_id
+        );
+        let resp = self
+            .http_client_with_auth(Method::POST, &url)
+            .await?
+            .json(&params)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<()>::from_response(resp).await?.into_error()
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn get_collab_member(
+        &self,
+        params: CollabMemberIdentify,
+    ) -> Result<AFCollabMember, AppResponseError> {
+        let url = format!(
+            "{}/api/workspace/{}/collab/{}/member",
+            self.base_url, params.workspace_id, &params.object_id
+        );
+        let resp = self
+            .http_client_with_auth(Method::GET, &url)
+            .await?
+            .json(&params)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<AFCollabMember>::from_response(resp)
+            .await?
+            .into_data()
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn update_collab_member(
+        &self,
+        params: UpdateCollabMemberParams,
+    ) -> Result<(), AppResponseError> {
+        let url = format!(
+            "{}/api/workspace/{}/collab/{}/member",
+            self.base_url, params.workspace_id, &params.object_id
+        );
+        let resp = self
+            .http_client_with_auth(Method::PUT, &url)
+            .await?
+            .json(&params)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<()>::from_response(resp).await?.into_error()
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn remove_collab_member(
+        &self,
+        params: CollabMemberIdentify,
+    ) -> Result<(), AppResponseError> {
+        let url = format!(
+            "{}/api/workspace/{}/collab/{}/member",
+            self.base_url, params.workspace_id, &params.object_id
+        );
+        let resp = self
+            .http_client_with_auth(Method::DELETE, &url)
+            .await?
+            .json(&params)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<()>::from_response(resp).await?.into_error()
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn get_collab_members(
+        &self,
+        params: QueryCollabMembers,
+    ) -> Result<AFCollabMembers, AppResponseError> {
+        let url = format!(
+            "{}/api/workspace/{}/collab/{}/member/list",
+            self.base_url, params.workspace_id, &params.object_id
+        );
+        let resp = self
+            .http_client_with_auth(Method::GET, &url)
+            .await?
+            .json(&params)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<AFCollabMembers>::from_response(resp)
+            .await?
+            .into_data()
+    }
+
+    pub fn ws_url(&self) -> String {
+        format!("{}/v1", self.ws_addr)
+    }
+    
+    pub async fn ws_connect_info(&self) -> Result<ConnectInfo, AppResponseError> {
+        self
+            .refresh_if_expired(chrono::Local::now().timestamp())
+            .await?;
+    
+        Ok(ConnectInfo {
+            access_token: self.access_token()?,
+            client_version: self.client_version.clone(),
+            device_id: self.device_id.clone(),
+        })
+    }
+
+    pub fn get_blob_url(&self, workspace_id: &str, file_id: &str) -> String {
+        format!(
+            "{}/api/file_storage/{}/blob/{}",
+            self.base_url, workspace_id, file_id
+        )
+    }
+
+    
+
 }
 
 impl Display for Client {
