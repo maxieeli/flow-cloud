@@ -458,6 +458,99 @@ impl Client {
         Ok(())
     }
 
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn create_workspace(
+        &self,
+        params: CreateWorkspaceParam,
+    ) -> Result<AFWorkspace, AppResponseError> {
+        let url = format!("{}/api/workspace", self.base_url);
+        let resp = self
+            .http_client_with_auth(Method::POST, &url)
+            .await?
+            .json(&params)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<AFWorkspace>::from_response(resp)
+            .await?
+            .into_data()
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn patch_workspace(&self, params: PatchWorkspaceParam) -> Result<(), AppResponseError> {
+        let url = format!("{}/api/workspace", self.base_url);
+        let resp = self
+            .http_client_with_auth(Method::PATCH, &url)
+            .await?
+            .json(&params)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<()>::from_response(resp).await?.into_error()
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn get_workspaces(&self) -> Result<AFWorkspaces, AppResponseError> {
+        let url = format!("{}/api/workspace", self.base_url);
+        let resp = self
+            .http_client_with_auth(Method::GET, &url)
+            .await?
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<AFWorkspaces>::from_response(resp)
+            .await?
+            .into_data()
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn open_workspace(&self, workspace_id: &str) -> Result<AFWorkspace, AppResponseError> {
+        let url = format!("{}/api/workspace/{}/open", self.base_url, workspace_id);
+        let resp = self
+            .http_client_with_auth(Method::PUT, &url)
+            .await?
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<AFWorkspace>::from_response(resp)
+            .await?
+            .into_data()
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn leave_workspace(&self, workspace_id: &str) -> Result<(), AppResponseError> {
+        let url = format!("{}/api/workspace/{}/leave", self.base_url, workspace_id);
+        let resp = self
+            .http_client_with_auth(Method::POST, &url)
+            .await?
+            .json(&())
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<()>::from_response(resp).await?.into_error()
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn get_workspace_members<W: AsRef<str>>(
+        &self,
+        workspace_id: W,
+    ) -> Result<Vec<AFWorkspaceMember>, AppResponseError> {
+        let url = format!(
+            "{}/api/workspace/{}/member",
+            self.base_url,
+            workspace_id.as_ref()
+        );
+        let resp = self
+            .http_client_with_auth(Method::GET, &url)
+            .await?
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<Vec<AFWorkspaceMember>>::from_response(resp)
+            .await?
+            .into_data()
+    }
+
 }
 
 impl Display for Client {
