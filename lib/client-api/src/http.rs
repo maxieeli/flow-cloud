@@ -551,6 +551,146 @@ impl Client {
             .into_data()
     }
 
+    pub async fn invite_workspace_members(
+        &self,
+        workspace_id: &str,
+        invitations: Vec<WorkspaceMemberInvitation>,
+    ) -> Result<(), AppResponseError> {
+        let url = format!("{}/api/workspace/{}/invite", self.base_url, workspace_id);
+        let resp = self
+            .http_client_with_auth(Method::POST, &url)
+            .await?
+            .json(&invitations)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<()>::from_response(resp).await?.into_error()?;
+        Ok(())
+    }
+
+    pub async fn list_workspace_invitations(
+        &self,
+        status: Option<AFWorkspaceInvitationStatus>,
+    ) -> Result<Vec<AFWorkspaceInvitation>, AppResponseError> {
+        let url = format!("{}/api/workspace/invite", self.base_url);
+        let mut builder = self.http_client_with_auth(Method::GET, &url).await?;
+        if let Some(status) = status {
+            builder = builder.query(&[("status", status)])
+        }
+        let resp = builder.send().await?;
+        log_request_id(&resp);
+        let res = AppResponse::<Vec<AFWorkspaceInvitation>>::from_response(resp).await?;
+        res.into_data()
+    }
+
+    pub async fn accept_workspace_invitation(
+        &self,
+        invitation_id: &str,
+    ) -> Result<(), AppResponseError> {
+        let url = format!(
+            "{}/api/workspace/accept-invite/{}",
+            self.base_url, invitation_id
+        );
+        let resp = self
+            .http_client_with_auth(Method::POST, &url)
+            .await?
+            .json(&())
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<()>::from_response(resp).await?.into_error()?;
+        Ok(())
+    }
+
+    // deprecated
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn add_workspace_members<T: Into<CreateWorkspaceMembers>, W: AsRef<str>>(
+        &self,
+        workspace_id: W,
+        members: T,
+    ) -> Result<(), AppResponseError> {
+        let members = members.into();
+        let url = format!(
+            "{}/api/workspace/{}/member",
+            self.base_url,
+            workspace_id.as_ref()
+        );
+        let resp = self
+            .http_client_with_auth(Method::POST, &url)
+            .await?
+            .json(&members)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<()>::from_response(resp).await?.into_error()?;
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn update_workspace_member<T: AsRef<str>>(
+        &self,
+        workspace_id: T,
+        changeset: WorkspaceMemberChangeset,
+    ) -> Result<(), AppResponseError> {
+        let url = format!(
+            "{}/api/workspace/{}/member",
+            self.base_url,
+            workspace_id.as_ref()
+        );
+        let resp = self
+            .http_client_with_auth(Method::PUT, &url)
+            .await?
+            .json(&changeset)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<()>::from_response(resp).await?.into_error()?;
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip_all, err)]
+    pub async fn remove_workspace_members<T: AsRef<str>>(
+        &self,
+        workspace_id: T,
+        member_emails: Vec<String>,
+    ) -> Result<(), AppResponseError> {
+        let url = format!(
+            "{}/api/workspace/{}/member",
+            self.base_url,
+            workspace_id.as_ref()
+        );
+        let payload = WorkspaceMembers::from(member_emails);
+        let resp = self
+            .http_client_with_auth(Method::DELETE, &url)
+            .await?
+            .json(&payload)
+            .send()
+            .await?;
+        log_request_id(&resp);
+        AppResponse::<()>::from_response(resp).await?.into_error()?;
+        Ok(())
+    }
+
+    #[instrument(skip_all, err)]
+    pub async fn sign_in_password(
+        &self,
+        email: &str,
+        password: &str,
+    ) -> Result<bool, AppResponseError> {
+        let access_token_resp = self
+            .gotrue_client
+            .token(&Grant::Password(PasswordGrant {
+                email: email.to_owned(),
+                password: password.to_owned(),
+            }))
+            .await?;
+        let is_new = self
+            .verify_token_cloud(&access_token_resp.access_token)
+            .await?;
+        self.token.write().set(access_token_resp);
+        Ok(is_new)
+    }
+
 }
 
 impl Display for Client {
