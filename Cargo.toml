@@ -104,7 +104,7 @@ client-websocket.workspace = true
 #criterion = { version = "0.5", features = ["async_tokio"] }
 
 [[bin]]
-name = "appflowy_cloud"
+name = "appflow_cloud"
 path = "src/main.rs"
 
 [lib]
