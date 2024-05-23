@@ -132,7 +132,6 @@ members = [
     "lib/gotrue",
     "lib/realtime-protocol",
     "lib/shared-entity",
-    "lib/wasm-test",
     "lib/workspace-template",
 ]
 
