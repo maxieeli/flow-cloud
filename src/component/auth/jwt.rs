@@ -26,6 +26,36 @@ impl Deref for UserUuid {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct UserToken(pub String);
+
+impl UserToken {
+    pub fn from_auth(auth: Authorization) -> Result<Self, actix_web::Error> {
+        Ok(Self(auth.token))
+    }
+}
+
+impl Display for UserToken {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl FromRequest for UserUuid {
+    type Error = actix_web::Error;
+    type Future = std::future::Ready<Result<Self, Self::Error>>;
+    fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
+        let auth = get_auth_from_request(req);
+        match auth {
+            Ok(auth) => match UserUuid::from_auth(auth) {
+                Ok(uuid) => std::future::ready(Ok(uuid)),
+                Err(e) => std::future::ready(Err(e)),
+            },
+            Err(e) => std::future::ready(Err(e)),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Authorization {
     pub token: String,
