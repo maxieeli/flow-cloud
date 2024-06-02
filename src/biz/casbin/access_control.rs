@@ -121,8 +121,229 @@ impl AccessControl {
             Ok(true)
         }
     }
-
 }
 
+/// casbin model online writer: https://casbin.org/editor/
+pub const MODEL_CONF: &str = r###"
+[request_definition]
+r = sub, obj, act
 
+[policy_definition]
+p = sub, obj, act
 
+[role_definition]
+g = _, _ # role and access level rule
+
+[policy_effect]
+e = some(where (p.eft == allow))
+
+[matchers]
+m = r.sub == p.sub && p.obj == r.obj && g(p.act, r.act)
+"###;
+
+/// Represents the entity stored at the index of the access control policy.
+/// `subject_id, object_id, role/action`
+/// E.g. user1, collab::123, Owner
+pub const POLICY_FIELD_INDEX_SUBJECT: usize = 0;
+pub const POLICY_FIELD_INDEX_OBJECT: usize = 1;
+pub const POLICY_FIELD_INDEX_ACTION: usize = 2;
+/// Represents the entity stored at the index of the grouping.
+/// E.g. Owner, Write
+#[allow(dead_code)]
+const GROUPING_FIELD_INDEX_ROLE: usize = 0;
+#[allow(dead_code)]
+const GROUPING_FIELD_INDEX_ACTION: usize = 1;
+
+/// Represents the object type that is stored in the access control policy.
+#[derive(Debug)]
+pub enum ObjectType<'id> {
+    /// Stored as `workspace::<uuid>`
+    Workspace(&'id str),
+    /// Stored as `collab::<uuid>`
+    Collab(&'id str),
+}
+
+impl ObjectType<'_> {
+    pub fn policy_object(&self) -> String {
+        match self {
+            ObjectType::Collab(s) => format!("collab::{}", s),
+            ObjectType::Workspace(s) => format!("workspace::{}", s),
+        }
+    }
+    
+    pub fn object_id(&self) -> &str {
+        match self {
+            ObjectType::Collab(s) => s,
+            ObjectType::Workspace(s) => s,
+        }
+    }
+}
+
+/// Represents the action type that is stored in the access control policy.
+#[derive(Debug)]
+pub enum ActionType {
+    Role(AFRole),
+    Level(AFAccessLevel),
+}
+
+impl ToACAction for ActionType {
+    fn to_action(&self) -> &str {
+        match self {
+            ActionType::Role(role) => role.to_action(),
+            ActionType::Level(level) => level.to_action(),
+        }
+    }
+}
+
+/// Represents the actions that can be performed on objects.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum Action {
+    Read,
+    Write,
+    Delete,
+}
+
+impl PartialOrd for Action {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Action {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            // Read
+            (Action::Read, Action::Read) => Ordering::Equal,
+            (Action::Read, _) => Ordering::Less,
+            (_, Action::Read) => Ordering::Greater,
+            // Write
+            (Action::Write, Action::Write) => Ordering::Equal,
+            (Action::Write, Action::Delete) => Ordering::Less,
+            // Delete
+            (Action::Delete, Action::Write) => Ordering::Greater,
+            (Action::Delete, Action::Delete) => Ordering::Equal,
+        }
+    }
+}
+
+impl ToRedisArgs for Action {
+    fn write_redis_args<W>(&self, out: &mut W)
+    where
+        W: ?Sized + RedisWrite
+    {
+        self.to_action().write_redis_args(out)    
+    }
+}
+
+impl FromRedisValue for Action {
+    fn from_redis_value(v: &Value) -> RedisResult<Self> {
+        let s: String = FromRedisValue::from_redis_value(v)?;
+        match s.as_str() {
+            "read" => Ok(Action::Read),
+            "write" => Ok(Action::Write),
+            "delete" => Ok(Action::Delete),
+            _ => Err(RedisError::from((ErrorKind::TypeError, "invalid action"))),
+        }
+    }
+}
+
+impl ToACAction for Action {
+    fn to_action(&self) -> &str {
+        match self {
+            Action::Read => "read",
+            Action::Write => "write",
+            Action::Delete => "delete",
+        }
+    }
+}
+
+impl ToACAction for &Action {
+    fn to_action(&self) -> &str {
+        match self {
+            Action::Read => "read",
+            Action::Write => "write",
+            Action::Delete => "delete",
+        }
+    }
+}
+
+impl From<&Method> for Action {
+    fn from(method: &Method) -> Self {
+        match *method {
+            Method::POST => Action::Write,
+            Method::PUT => Action::Write,
+            Method::DELETE => Action::Delete,
+            _ => Action::Read,
+        }
+    }
+}
+
+pub enum ActionVariant<'a> {
+    FromRole(&'a AFRole),
+    FromAccessLevel(&'a AFAccessLevel),
+    FromAction(&'a Action),
+}
+
+impl ToACAction for ActionVariant<'_> {
+    fn to_action(&self) -> &str {
+        match self {
+            ActionVariant::FromRole(role) => role.to_action(),
+            ActionVariant::FromAccessLevel(level) => level.to_action(),
+            ActionVariant::FromAction(action) => action.to_action(),
+        }
+    }
+}
+
+pub trait ToACAction {
+    fn to_action(&self) -> &str;
+}
+pub trait FromACAction {
+    fn from_action(action: &str) -> Self;
+}
+
+impl ToACAction for AFAccessLevel {
+    fn to_action(&self) -> &str {
+        match self {
+            AFAccessLevel::ReadOnly => "10",
+            AFAccessLevel::ReadAndComment => "20",
+            AFAccessLevel::ReadAndWrite => "30",
+            AFAccessLevel::FullAccess => "50",
+        }
+    }
+}
+  
+impl FromACAction for AFAccessLevel {
+    fn from_action(action: &str) -> Self {
+        Self::from(action)
+    }
+}
+
+impl ToACAction for AFRole {
+    fn to_action(&self) -> &str {
+        match self {
+            AFRole::Owner => "1",
+            AFRole::Member => "2",
+            AFRole::Guest => "3",
+        }
+    }
+}
+
+impl FromACAction for AFRole {
+    fn from_action(action: &str) -> Self {
+        Self::from(action)
+    }
+}
+
+lazy_static! {
+    static ref ENABLE_ACCESS_CONTROL: bool = {
+        match std::env::var("APPFLOW_ACCESS_CONTROL") {
+            Ok(value) => value.eq_ignore_ascii_case("true") || value.eq("1"),
+            Err(_) => false,
+        }
+    };
+}
+
+#[inline]
+pub fn enable_access_control() -> bool {
+    *ENABLE_ACCESS_CONTROL
+}
