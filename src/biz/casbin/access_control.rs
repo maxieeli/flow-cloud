@@ -347,3 +347,59 @@ lazy_static! {
 pub fn enable_access_control() -> bool {
     *ENABLE_ACCESS_CONTROL
 }
+
+pub(crate) async fn load_group_policies(enforcer: &mut Enforcer) -> Result<(), AppError> {
+    // Grouping definition of access level to action.
+    let af_access_levels = [
+        AFAccessLevel::ReadOnly,
+        AFAccessLevel::ReadAndComment,
+        AFAccessLevel::ReadAndWrite,
+        AFAccessLevel::FullAccess,
+    ];
+    let mut grouping_policies = Vec::new();
+    for level in &af_access_levels {
+        // all levels can read
+        grouping_policies.push([level.to_action(), Action::Read.to_action()].to_vec());
+        if level.can_write() {
+            grouping_policies.push([level.to_action(), Action::Write.to_action()].to_vec());
+        }
+        if level.can_delete() {
+            grouping_policies.push([level.to_action(), Action::Delete.to_action()].to_vec());
+        }
+    }
+
+    let af_roles = [AFRole::Owner, AFRole::Member, AFRole::Guest];
+    for role in &af_roles {
+        match role {
+            AFRole::Owner => {
+                grouping_policies.push([role.to_action(), Action::Delete.to_action()].to_vec());
+                grouping_policies.push([role.to_action(), Action::Write.to_action()].to_vec());
+                grouping_policies.push([role.to_action(), Action::Read.to_action()].to_vec());
+            },
+            AFRole::Member => {
+                grouping_policies.push([role.to_action(), Action::Write.to_action()].to_vec());
+                grouping_policies.push([role.to_action(), Action::Read.to_action()].to_vec());
+            },
+            AFRole::Guest => {
+                grouping_policies.push([role.to_action(), Action::Read.to_action()].to_vec());
+            },
+        }
+    }
+
+    let grouping_policies = grouping_policies
+        .into_iter()
+        .map(|actions| actions.into_iter().map(|a| a.to_string()).collect())
+        .collect();
+    enforcer
+        .add_grouping_policies(grouping_policies)
+        .await
+        .map_err(|e| AppError::Internal(anyhow!("Failed to add grouping policies: {}", e)))?;
+    Ok(())
+}
+
+pub(crate) async fn casbin_model() -> Result<DefaultModel, AppError> {
+    let model = casbin::DefaultModel::from_str(MODEL_CONF)
+        .await
+        .map_err(|e| AppError::Internal(anyhow!("Failed to create access control model: {}", e)))?;
+    Ok(model)
+}
