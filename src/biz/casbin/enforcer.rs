@@ -110,5 +110,43 @@ where
                     .map_err(|e| AppError::Internal(anyhow!("enforce: {e:?}")))?;
             }
         }
+        if !result  {
+            let policy_request = PolicyRequest::new(*uid, &obj, &act);
+            let segments = policy_request.into_segments();
+            result = self
+                .enforcer
+                .read()
+                .await
+                .enforce(segments)
+                .map_err(|e| AppError::Internal(anyhow!("enforce: {e:?}")))?;
+        }
+        Ok(result)
+    }
+
+    #[inline]
+    async fn remove_with_enforcer(
+        &self,
+        uid: &i64,
+        object_type: &ObjectType<'_>,
+        enforcer: &mut Enforcer,
+    ) -> Result<(), AppError> {
+        let policies_for_user_on_object = policies_for_subject_with_given_object(uid, object_type, enforcer).await;
+        if policies_for_user_on_object.is_empty() {
+            return Ok(());
+        }
+        event!(
+            tracing::Level::INFO,
+            "[access control]: remove policy:user={}, object={}, policies={:?}",
+            uid,
+            object_type.policy_object(),
+            policies_for_user_on_object
+        );
+        enforcer
+            .remove_policies(policies_for_user_on_object)
+            .await
+            .map_err(|e| AppError::Internal(anyhow!("error enforce: {e:?}")))?;
+        Ok(())
     }
 }
+
+
