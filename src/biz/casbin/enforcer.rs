@@ -149,4 +149,37 @@ where
     }
 }
 
+fn validate_obj_action(obj: &ObjectType<'_>, act: &ActionVariant) -> Result<(), AppError> {
+    match (obj, act) {
+        (ObjectType::Workspace(_), ActionVariant::FromRole(_))
+        | (ObjectType::Collab(_), ActionVariant::FromAccessLevel(_)) => Ok(()),
+        _ => Err(AppError::Internal(anyhow!(
+            "invalid object type and action type combination: object={:?}, action={:?}",
+            obj,
+            act.to_action()
+        ))),
+    }
+}
 
+#[inline]
+async fn policies_for_subject_with_given_object<T: ToString>(
+    subject: T,
+    object_type: &ObjectType<'_>,
+    enforcer: &Enforcer,
+) -> Vec<Vec<String>> {
+    let subject = subject.to_string();
+    let object_type_id = object_type.policy_object();
+    let policies_related_to_object = enforcer.get_filtered_policy(POLICY_FIELD_INDEX_OBJECT, vec![object_type_id]);
+    policies_related_to_object
+        .into_iter()
+        .filter(|p| p[POLICY_FIELD_INDEX_OBJECT] == subject)
+        .collect::<Vec<_>>()
+}
+
+pub struct NoEnforceGroup;
+#[async_trait]
+impl EnforcerGroup for NoEnforceGroup {
+    async fn get_enforce_group_id(&self, _uid: &i64) -> Option<String> {
+        None
+    }
+}
