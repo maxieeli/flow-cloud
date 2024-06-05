@@ -108,3 +108,62 @@ pub(crate) fn spawn_listen_on_workspace_member_change(
     });
 }
 
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Deserialize, Clone, Debug)]
+pub enum WorkspaceMemberAction {
+    INSERT,
+    UPDATE,
+    DELETE,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct WorkspaceMemberNotification {
+    pub old: Option<WorkspaceMemberRow>,
+    pub new: Option<WorkspaceMemberRow>,
+    pub action_type: WorkspaceMemberAction,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct WorkspaceMemberRow {
+    pub uid: i64,
+    pub role_id: i64,
+    pub workspace_id: Uuid,
+}
+
+pub type WorkspaceMemberListener = PostgresDBListener<WorkspaceMemberNotification>;
+
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Deserialize, Clone, Debug)]
+pub enum CollabMemberAction {
+    INSERT,
+    UPDATE,
+    DELETE,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct CollabMemberNotification {
+    /// The old will be None if the row does not exist before
+    pub old: Option<AFCollabMemberRow>,
+    /// The new will be None if the row is deleted
+    pub new: Option<AFCollabMemberRow>,
+    /// Represent the action of the database. Such as INSERT, UPDATE, DELETE
+    pub action_type: CollabMemberAction,
+}
+
+impl CollabMemberNotification {
+    pub fn old_uid(&self) -> Option<&i64> {
+        self.old.as_ref().map(|o| &o.uid)
+    }
+  
+    pub fn old_oid(&self) -> Option<&str> {
+        self.old.as_ref().map(|o| o.oid.as_str())
+    }
+    pub fn new_uid(&self) -> Option<&i64> {
+        self.new.as_ref().map(|n| &n.uid)
+    }
+    pub fn new_oid(&self) -> Option<&str> {
+        self.new.as_ref().map(|n| n.oid.as_str())
+    }
+}
+
+pub type CollabMemberListener = PostgresDBListener<CollabMemberNotification>;
