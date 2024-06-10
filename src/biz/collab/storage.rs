@@ -159,6 +159,131 @@ where
             .map_err(AppError::from)?;
         Ok(())
     }
+
+    #[instrument(level = "trace", skip(self, params), oid = %params.oid, err)]
+    #[allow(clippy::blocks_in_if_conditions)]
+    async fn insert_or_update_collab_with_transaction(
+        &self,
+        workspace_id: &str,
+        uid: &i64,
+        params: CollabParams,
+        transaction: &mut Transaction<'_, sqlx::Postgres>,
+    ) -> DatabaseResult<()> {
+        params.validate()?;
+        let is_collab_exist_in_db = is_collab_exists(&params.object_id, transaction.deref_mut()).await?;
+        if !is_collab_exist_in_db {
+            self
+                .access_control
+                .update_policy(uid, &params.object_id, AFAccessLevel::FullAccess)
+                .await?;
+        }
+        self
+            .check_collab_permission(workspace_id, uid, &params, is_collab_exist_in_db)
+            .await?;
+
+        self
+            .cache
+            .insert_collab_encoded(workspace_id, uid, params, transaction)
+            .await?;
+        Ok(())
+    }
+
+    async fn get_collab_encoded(
+        &self,
+        uid: &i64,
+        params: QueryCollabParams,
+        is_collab_init: bool,
+    ) -> DatabaseResult<EncodedCollab> {
+        params.validate()?;
+        let can_read = self
+            .access_control
+            .enforce_read_collab(&params.workspace_id, uid, &params.object_id)
+            .await?;
+        if !can_read {
+            return Err(AppError::NotEnoughPermissions {
+                user: uid.to_string(),
+                action: format!("read collab:{}", params.object_id),
+            });
+        }
+        // Early return if editing collab is initialized, as it indicates no need to query further.
+        if !is_collab_init {
+            // Attempt to retrieve encoded collab from the editing collab
+            if let Some(value) = self.get_encode_collab_from_editing(&params.object_id).await {
+                return Ok(value);
+            }
+        }
+        let encode_collab = self.cache.get_collab_encoded(uid, params).await?;
+        Ok(encode_collab)
+    }
+
+    async fn batch_get_collab(
+        &self,
+        uid: &i64,
+        queries: Vec<QueryCollab>,
+    ) -> HashMap<String, QueryCollabResult> {
+        let (valid_queries, mut results): (Vec<_>, HashMap<_, _>) =
+            queries
+                .into_iter()
+                .partition_map(|params| match params.validate() {
+                    Ok(_) => Either::Left(params),
+                    Err(err) => Either::Right((
+                        params.object_id,
+                        QueryCollabResult::Failed {
+                            error: err.to_string(),
+                        },
+                    )),
+                });
+        results.extend(self.cache.batch_get_encode_collab(uid, valid_queries).await);
+        results
+    }
+
+    async fn delete_collab(
+        &self,
+        workspace_id: &str,
+        uid: &i64,
+        object_id: &str,
+    ) -> DatabaseResult<()> {
+        if !self
+            .access_control
+            .enforce_delete(workspace_id, uid, object_id)
+            .await?
+        {
+            return Err(AppError::NotEnoughPermissions {
+                user: uid.to_string(),
+                action: format!("delete collab:{}", object_id),
+            });
+        }
+        self.cache.remove_collab(object_id).await?;
+        Ok(())
+    }
+
+    async fn should_create_snapshot(&self, oid: &str) -> bool {
+        self.snapshot_control.should_create_snapshot(oid).await
+    }
+    
+    async fn create_snapshot(&self, params: InsertSnapshotParams) -> DatabaseResult<AFSnapshotMeta> {
+        self.snapshot_control.create_snapshot(params).await
+    }
+    
+    async fn queue_snapshot(&self, params: InsertSnapshotParams) -> DatabaseResult<()> {
+        self.snapshot_control.queue_snapshot(params).await
+    }
+
+    async fn get_collab_snapshot(
+        &self,
+        workspace_id: &str,
+        object_id: &str,
+        snapshot_id: &i64,
+    ) -> DatabaseResult<SnapshotData> {
+        self
+            .snapshot_control
+            .get_snapshot(workspace_id, object_id, snapshot_id)
+            .await
+    }
+
+    async fn get_collab_snapshot_list(&self, oid: &str) -> DatabaseResult<AFSnapshotMetas> {
+        self.snapshot_control.get_collab_snapshot_list(oid).await
+    }
 }
 
 
