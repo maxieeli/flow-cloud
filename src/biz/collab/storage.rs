@@ -286,4 +286,14 @@ where
     }
 }
 
-
+pub fn check_encoded_collab_data(object_id: &str, data: &[u8]) -> Result<(), anyhow::Error> {
+    let encoded_collab = EncodedCollab::decode_from_bytes(data)?;
+    let _ = Collab::new_with_doc_state(
+        CollabOrigin::Empty,
+        object_id,
+        encoded_collab.doc_state.to_vec(),
+        vec![],
+        false,
+    )?;
+    Ok(())
+}
