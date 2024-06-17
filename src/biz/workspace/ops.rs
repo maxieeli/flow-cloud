@@ -144,4 +144,220 @@ pub async fn accept_workspace_invite(
     Ok(())
 }
 
+#[instrument(level = "debug", skip_all, err)]
+pub async fn invite_workspace_members(
+    pg_pool: &PgPool,
+    gotrue_admin: &GoTrueAdmin,
+    gotrue_client: &gotrue::api::Client,
+    inviter: &Uuid,
+    workspace_id: &Uuid,
+    invitations: Vec<WorkspaceMemberInvitation>,
+) -> Result<(), AppError> {
+    let mut txn = pg_pool
+        .begin()
+        .await
+        .context("Begin transaction to invite workspace members")?;
+    let admin_token = gotrue_admin.token(gotrue_client).await?;
+    for invitation in invitations {
+        match gotrue_client
+            .admin_invite_user(
+                &admin_token,
+                &InviteUserParams {
+                    email: invitation.email.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            Ok(new_user) => {
+                info!(
+                    "Invited new user: {:?} to workspace: {:?}",
+                    new_user, workspace_id
+                );
+            },
+            Err(err) => match err {
+                app_error::gotrue::GoTrueError::Internal(ref err_serde) => {
+                    match (err_serde.code, err_serde.msg.as_str()) {
+                        (422, "A user with this email address has already been registered") => {
+                            info!("User already exists, skipping invite");
+                        },
+                        _ => return Err(AppError::Internal(err.into())),
+                    }
+                },
+                _ => return Err(err.into()),
+            },
+        }
+        insert_workspace_invitation(
+            &mut txn,
+            workspace_id,
+            inviter,
+            invitation.email.as_str(),
+            invitation.role,
+          )
+          .await?;
+    }
+    txn
+        .commit()
+        .await
+        .context("Commit transaction to invite workspace members")?;
+    Ok(())
+}
 
+#[instrument(level = "debug", skip_all, err)]
+pub async fn list_workspace_invitations_for_user(
+    pg_pool: &PgPool,
+    user_uuid: &Uuid,
+    status: Option<AFWorkspaceInvitationStatus>,
+) -> Result<Vec<AFWorkspaceInvitation>, AppError> {
+    let invis = select_workspace_invitations_for_user(pg_pool, user_uuid, status).await?;
+    Ok(invis)
+}
+
+#[instrument(level = "debug", skip_all, err)]
+pub async fn add_workspace_members(
+    pg_pool: &PgPool,
+    _user_uuid: &Uuid,
+    workspace_id: &Uuid,
+    members: Vec<CreateWorkspaceMember>,
+    workspace_access_control: &impl WorkspaceAccessControl,
+) -> Result<(), AppError> {
+    let mut txn = pg_pool
+        .begin()
+        .await
+        .context("Begin transaction to insert workspace members")?;
+
+    let mut role_by_uid = HashMap::new();
+    for member in members.into_iter() {
+        let access_level = AFAccessLevel::from(&member.role);
+        let uid = select_uid_from_email(txn.deref_mut(), &member.email).await?;
+        upsert_workspace_member_with_txn(&mut txn, workspace_id, &member.email, member.role.clone())
+            .await?;
+        upsert_collab_member_with_txn(uid, workspace_id.to_string(), &access_level, &mut txn).await?;
+        role_by_uid.insert(uid, member.role);
+    }
+
+    for (uid, role) in role_by_uid {
+        workspace_access_control
+            .insert_role(&uid, workspace_id, role)
+            .await?;
+    }
+    txn
+        .commit()
+        .await
+        .context("Commit transaction to insert workspace members")?;
+
+    Ok(())
+}
+
+pub async fn add_workspace_members_db_only(
+    pg_pool: &PgPool,
+    _user_uuid: &Uuid,
+    workspace_id: &Uuid,
+    members: Vec<CreateWorkspaceMember>,
+) -> Result<(), AppError> {
+    let mut txn = pg_pool
+        .begin()
+        .await
+        .context("Begin transaction to insert workspace members")?;
+  
+    for member in members.into_iter() {
+        let access_level = match &member.role {
+            AFRole::Owner => AFAccessLevel::FullAccess,
+            AFRole::Member => AFAccessLevel::ReadAndWrite,
+            AFRole::Guest => AFAccessLevel::ReadOnly,
+        };
+  
+        let uid = select_uid_from_email(txn.deref_mut(), &member.email).await?;
+        upsert_workspace_member_with_txn(&mut txn, workspace_id, &member.email, member.role.clone())
+            .await?;
+        upsert_collab_member_with_txn(uid, workspace_id.to_string(), &access_level, &mut txn).await?;
+    }
+  
+    txn
+        .commit()
+        .await
+        .context("Commit transaction to insert workspace members")?;
+    Ok(())
+}
+
+pub async fn leave_workspace(
+    pg_pool: &PgPool,
+    workspace_id: &Uuid,
+    user_uuid: &Uuid,
+    workspace_access_control: &impl WorkspaceAccessControl,
+) -> Result<(), AppResponseError> {
+    let email = database::user::select_email_from_user_uuid(pg_pool, user_uuid).await?;
+    remove_workspace_members(pg_pool, workspace_id, &[email], workspace_access_control).await
+}
+  
+pub async fn remove_workspace_members(
+    pg_pool: &PgPool,
+    workspace_id: &Uuid,
+    member_emails: &[String],
+    workspace_access_control: &impl WorkspaceAccessControl,
+) -> Result<(), AppResponseError> {
+    let mut txn = pg_pool
+        .begin()
+        .await
+        .context("Begin transaction to delete workspace members")?;
+  
+    for email in member_emails {
+        delete_workspace_members(&mut txn, workspace_id, email.as_str()).await?;
+        if let Ok(uid) = select_uid_from_email(txn.deref_mut(), email)
+            .await
+            .map_err(AppResponseError::from)
+        {
+            workspace_access_control
+                .remove_role(&uid, workspace_id)
+                .await?;
+        }
+    }
+  
+    txn
+        .commit()
+        .await
+        .context("Commit transaction to delete workspace members")?;
+    Ok(())
+}
+  
+pub async fn get_workspace_members(
+    pg_pool: &PgPool,
+    _user_uuid: &Uuid,
+    workspace_id: &Uuid,
+) -> Result<Vec<AFWorkspaceMemberRow>, AppResponseError> {
+    Ok(select_workspace_member_list(pg_pool, workspace_id).await?)
+}
+  
+pub async fn update_workspace_member(
+    uid: &i64,
+    pg_pool: &PgPool,
+    workspace_id: &Uuid,
+    changeset: &WorkspaceMemberChangeset,
+    workspace_access_control: &impl WorkspaceAccessControl,
+) -> Result<(), AppError> {
+    if let Some(role) = &changeset.role {
+        upsert_workspace_member(pg_pool, workspace_id, &changeset.email, role.clone()).await?;
+        workspace_access_control
+            .insert_role(uid, workspace_id, role.clone())
+            .await?;
+    }  
+    Ok(())
+}
+  
+pub async fn get_workspace_document_total_bytes(
+    pg_pool: &PgPool,
+    user_uuid: &Uuid,
+    workspace_id: &Uuid,
+) -> Result<WorkspaceUsage, AppError> {
+    let is_owner = select_user_is_workspace_owner(pg_pool, user_uuid, workspace_id).await?;
+    if !is_owner {
+        return Err(AppError::UserUnAuthorized(
+            "User is not the owner of the workspace".to_string(),
+        ));
+    }
+  
+    let byte_count = select_workspace_total_collab_bytes(pg_pool, workspace_id).await?;
+    Ok(WorkspaceUsage {
+        total_document_size: byte_count,
+    })
+}
