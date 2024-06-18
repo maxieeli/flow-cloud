@@ -193,3 +193,23 @@ impl RealtimeUserImpl {
         }
     }
 }
+
+impl Display for RealtimeUserImpl {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!(
+            "uid:{}|device_id:{}|connected_at:{}",
+            self.uid, self.device_id, self.timestamp,
+        ))
+    }
+}
+  
+impl RealtimeUser for RealtimeUserImpl {
+    fn uid(&self) -> i64 {
+        self.uid
+    }
+  
+    fn device_id(&self) -> &str {
+        &self.device_id
+    }
+}
+  
