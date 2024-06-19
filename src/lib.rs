@@ -5,3 +5,4 @@ pub mod component;
 pub mod domain;
 pub mod middleware;
 pub mod biz;
+pub mod api;

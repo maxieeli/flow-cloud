@@ -212,4 +212,3 @@ impl RealtimeUser for RealtimeUserImpl {
         &self.device_id
     }
 }
-  
