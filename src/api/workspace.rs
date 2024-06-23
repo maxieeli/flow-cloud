@@ -619,3 +619,255 @@ async fn create_collab_snapshot_handler(
         .await?;
     Ok(Json(AppResponse::Ok().with_data(meta)))
 }
+
+#[instrument(level = "trace", skip(path, state), err)]
+async fn get_all_collab_snapshot_list_handler(
+    path: web::Path<(String, String)>,
+    state: Data<AppState>,
+) -> Result<Json<AppResponse<AFSnapshotMetas>>> {
+    let (_, object_id) = path.into_inner();
+    let data = state
+        .collab_access_control_storage
+        .get_collab_snapshot_list(&object_id)
+        .await
+        .map_err(AppResponseError::from)?;
+    Ok(Json(AppResponse::Ok().with_data(data)))
+}
+
+#[instrument(level = "debug", skip(payload, state), err)]
+async fn batch_get_collab_handler(
+    user_uuid: UserUuid,
+    state: Data<AppState>,
+    payload: Json<BatchQueryCollabParams>,
+) -> Result<Json<AppResponse<BatchQueryCollabResult>>> {
+    let uid = state
+        .user_cache
+        .get_user_uid(&user_uuid)
+        .await
+        .map_err(AppResponseError::from)?;
+    let result = BatchQueryCollabResult(
+        state
+        .collab_access_control_storage
+        .batch_get_collab(&uid, payload.into_inner().0)
+        .await,
+    );
+    Ok(Json(AppResponse::Ok().with_data(result)))
+}
+
+#[instrument(skip(state, payload), err)]
+async fn update_collab_handler(
+    user_uuid: UserUuid,
+    payload: Json<CreateCollabParams>,
+    state: Data<AppState>,
+) -> Result<Json<AppResponse<()>>> {
+    let (params, workspace_id) = payload.into_inner().split();
+    let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+
+    let create_params = CreateCollabParams::from((workspace_id.to_string(), params));
+    let (params, workspace_id) = create_params.split();
+    state
+        .collab_access_control_storage
+        .insert_or_update_collab(&workspace_id, &uid, params)
+        .await?;
+    Ok(AppResponse::Ok().into())
+}
+
+#[instrument(level = "info", skip(state, payload), err)]
+async fn delete_collab_handler(
+    user_uuid: UserUuid,
+    payload: Json<DeleteCollabParams>,
+    state: Data<AppState>,
+) -> Result<Json<AppResponse<()>>> {
+    let payload = payload.into_inner();
+    payload.validate().map_err(AppError::from)?;
+  
+    let uid = state
+      .user_cache
+      .get_user_uid(&user_uuid)
+      .await
+      .map_err(AppResponseError::from)?;
+    state
+        .collab_access_control_storage
+        .delete_collab(&payload.workspace_id, &uid, &payload.object_id)
+        .await
+        .map_err(AppResponseError::from)?;
+    Ok(AppResponse::Ok().into())
+}
+
+#[instrument(level = "debug", skip(state, payload), err)]
+async fn add_collab_member_handler(
+    payload: Json<InsertCollabMemberParams>,
+    state: Data<AppState>,
+) -> Result<Json<AppResponse<()>>> {
+    let payload = payload.into_inner();
+    biz::collab::ops::create_collab_member(&state.pg_pool, &payload, &state.collab_access_control)
+        .await?;
+    Ok(Json(AppResponse::Ok()))
+}
+
+#[instrument(level = "debug", skip(state, payload), err)]
+async fn update_collab_member_handler(
+    user_uuid: UserUuid,
+    payload: Json<UpdateCollabMemberParams>,
+    state: Data<AppState>,
+) -> Result<Json<AppResponse<()>>> {
+    let payload = payload.into_inner();
+    biz::collab::ops::upsert_collab_member(
+        &state.pg_pool,
+        &user_uuid,
+        &payload,
+        &state.collab_access_control,
+    )
+    .await?;
+    Ok(Json(AppResponse::Ok()))
+}
+
+#[instrument(level = "debug", skip(state, payload), err)]
+async fn get_collab_member_handler(
+    payload: Json<CollabMemberIdentify>,
+    state: Data<AppState>,
+) -> Result<Json<AppResponse<AFCollabMember>>> {
+    let payload = payload.into_inner();
+    let member = biz::collab::ops::get_collab_member(&state.pg_pool, &payload).await?;
+    Ok(Json(AppResponse::Ok().with_data(member)))
+}
+
+#[instrument(skip(state, payload), err)]
+async fn remove_collab_member_handler(
+    payload: Json<CollabMemberIdentify>,
+    state: Data<AppState>,
+) -> Result<Json<AppResponse<()>>> {
+    let payload = payload.into_inner();
+    biz::collab::ops::delete_collab_member(&state.pg_pool, &payload, &state.collab_access_control)
+        .await?;
+    Ok(Json(AppResponse::Ok()))
+}
+
+#[instrument(level = "debug", skip(state, payload), err)]
+async fn get_collab_member_list_handler(
+    payload: Json<QueryCollabMembers>,
+    state: Data<AppState>,
+) -> Result<Json<AppResponse<AFCollabMembers>>> {
+    let members =
+        biz::collab::ops::get_collab_member_list(&state.pg_pool, &payload.into_inner()).await?;
+    Ok(Json(AppResponse::Ok().with_data(AFCollabMembers(members))))
+}
+
+#[instrument(level = "info", skip_all, err)]
+async fn post_realtime_message_stream_handler(
+    user_uuid: UserUuid,
+    mut payload: Payload,
+    server: Data<RealtimeServerAddr>,
+    state: Data<AppState>,
+    req: HttpRequest,
+) -> Result<Json<AppResponse<()>>> {
+    // TODO: after upgrade the client application, then the device_id should not be empty
+    let device_id = device_id_from_headers(req.headers()).unwrap_or_else(|_| "".to_string());
+    let uid = state
+        .user_cache
+        .get_user_uid(&user_uuid)
+        .await
+        .map_err(AppResponseError::from)?;
+
+    let mut bytes = BytesMut::new();
+    while let Some(item) = payload.next().await {
+        bytes.extend_from_slice(&item?);
+    }
+    event!(tracing::Level::INFO, "message len: {}", bytes.len());
+    let device_id = device_id.to_string();
+    let message = parser_realtime_msg(bytes.freeze(), req.clone()).await?;
+    let stream = Box::new(tokio_stream::once(message));
+    let mut stream_message = Some(ClientStreamMessage {
+        uid,
+        device_id,
+        stream,
+    });
+    const MAX_RETRIES: usize = 3;
+    const RETRY_DELAY: Duration = Duration::from_secs(2);
+    let mut attempts = 0;
+    while attempts < MAX_RETRIES {
+        match stream_message.take() {
+            None => {
+                return Err(AppError::Internal(anyhow!("Unexpected empty stream message")).into());
+            },
+            Some(message_to_send) => {
+                match server.try_send(message_to_send) {
+                    Ok(_) => return Ok(Json(AppResponse::Ok())),
+                    Err(err) if attempts < MAX_RETRIES - 1 => {
+                        attempts += 1;
+                        stream_message = Some(err.into_inner());
+                        sleep(RETRY_DELAY).await;
+                    },
+                    Err(err) => {
+                        return Err(
+                            AppError::Internal(anyhow!(
+                                "Failed to send client stream message to websocket server after {} attempts: {}",
+                                // attempts starts from 0, so add 1 for accurate count
+                                attempts + 1,
+                                err
+                            ))
+                            .into(),
+                        );
+                    },
+                }
+            },
+        }
+    }
+    Err(AppError::Internal(anyhow!("Failed to send message to websocket server")).into())
+}
+
+async fn get_workspace_usage_handler(
+    user_uuid: UserUuid,
+    workspace_id: web::Path<Uuid>,
+    state: Data<AppState>,
+) -> Result<Json<AppResponse<WorkspaceUsage>>> {
+    let res = biz::workspace::ops::get_workspace_document_total_bytes(
+        &state.pg_pool,
+        &user_uuid,
+        &workspace_id,
+    )
+    .await?;
+    Ok(Json(AppResponse::Ok().with_data(res)))
+}
+
+#[inline]
+async fn parser_realtime_msg(
+    payload: Bytes,
+    req: HttpRequest,
+) -> Result<RealtimeMessage, AppError> {
+    let HttpRealtimeMessage {
+        device_id: _,
+        payload
+    } = HttpRealtimeMessage::decode(payload.as_ref()).map_err(|err| AppError::Internal(err.into()))?;
+    let payload = match req.headers().get(X_COMPRESSION_TYPE) {
+        None => payload,
+        Some(_) => match compress_type_from_header_value(req.headers())? {
+            CompressionType::Brotli { buffer_size } => {
+                let decompressed_data = decompress(payload, buffer_size).await?;
+                event!(
+                    tracing::Level::TRACE,
+                    "Decompress realtime http message with len: {}",
+                    decompressed_data.len()
+                );
+                decompressed_data
+            },
+        },
+    };
+    let message = Message::from(payload);
+    match message {
+        Message::Binary(bytes) => {
+            let realtime_msg = tokio::task::spawn_blocking(move || {
+                RealtimeMessage::decode(&bytes).map_err(|err| {
+                    AppError::InvalidRequest(format!("Failed to parse RealtimeMessage: {}", err))
+                })
+            })
+            .await
+            .map_err(AppError::from)??;
+            Ok(realtime_msg)
+        },
+        _ => Err(AppError::InvalidRequest(format!(
+            "Unsupported message type: {:?}",
+            message
+        ))),
+    }
+}
