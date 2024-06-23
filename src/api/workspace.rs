@@ -407,4 +407,215 @@ async fn create_collab_handler(
     Ok(Json(AppResponse::Ok()))
 }
 
+#[instrument(skip(state, payload), err)]
+async fn batch_create_collab_handler(
+    user_uuid: UserUuid,
+    workspace_id: web::Path<Uuid>,
+    mut payload: Payload,
+    state: Data<AppState>,
+    req: HttpRequest,
+) -> Result<Json<AppResponse<()>>> {
+    let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+    let mut collab_params_list = vec![];
+    let workspace_id = workspace_id.into_inner().to_string();
+    let compress_type = compress_type_from_header_value(req.headers())?;
+    event!(
+        tracing::Level::DEBUG,
+        "start decompressing collab params list"
+    );
+    let start_time = Instant::now();
+    let mut payload_buffer = Vec::new();
+    while let Some(item) = payload.next().await {
+        if let Ok(bytes) = item {
+            match compress_type {
+                CompressionType::Brotli { buffer_size } => {
+                    payload_buffer.extend_from_slice(&bytes);
+                    // The client API uses a u32 value as the frame separator, which determines the size of each data frame.
+                    // The length of a u32 is fixed at 4 bytes. It's important not to change the size (length) of the u32,
+                    // unless you also make a corresponding update in the client API. Any mismatch in frame size handling
+                    // between the client and server could lead to incorrect data processing or communication errors.
+                    while payload_buffer.len() >= 4 {
+                        let size = u32::from_be_bytes([
+                            payload_buffer[0],
+                            payload_buffer[1],
+                            payload_buffer[2],
+                            payload_buffer[3],
+                        ]) as usize;
+                        if payload_buffer.len() < 4 + size {
+                            break;
+                        }
+                        let compressed_data = payload_buffer[4..4 + size].to_vec();
+                        let decompress_data = decompress(compressed_data, buffer_size).await?;
+                        let params = CollabParams::from_bytes(&decompress_data).map_err(|err| {
+                            AppError::InvalidRequest(format!(
+                                "Failed to parse CollabParams with brotli decompression data: {}",
+                                err
+                            ))
+                        })?;
+                        params.validate().map_err(AppError::from)?;
+                        collab_params_list.push(params);
+                        payload_buffer = payload_buffer[4 + size..].to_vec();
+                    }
+                },
+            }
+        }
+    }
+    let duration = start_time.elapsed();
+    event!(
+        tracing::Level::DEBUG,
+        "end decompressing collab params list, time taken: {:?}",
+        duration
+    );
 
+    if collab_params_list.is_empty() {
+        return Err(AppError::InvalidRequest("Empty collab params list".to_string()).into());
+    }
+
+    let mut transaction = state
+        .pg_pool
+        .begin()
+        .await
+        .context("acquire transaction to upsert collab")
+        .map_err(AppError::from)?;
+    for params in collab_params_list {
+        let object_id = params.object_id.clone();
+        state
+            .collab_access_control_stroage
+            .insert_or_update_collab_with_transaction(&workspace_id, &uid, params, &mut transaction)
+            .await?;
+        state
+            .collab_access_control
+            .update_access_level_policy(&uid, &object_id, AFAccessLevel::FullAccess)
+            .await?;
+    }
+    transaction
+        .commit()
+        .await
+        .context("fail to commit the transaction to upsert collab")
+        .map_err(AppError::from)?;
+    Ok(Json(AppResponse::Ok()))
+}
+
+#[instrument(skip(state, payload), err)]
+async fn create_collab_list_handler(
+    user_uuid: UserUuid,
+    payload: Bytes,
+    state: Data<AppState>,
+    req: HttpRequest,
+) -> Result<Json<AppResponse<()>>> {
+    let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+    let params = match req.headers().get(X_COMPRESSION_TYPE) {
+        None => BatchCreateCollabParams::from_bytes(&payload).map_err(|err| {
+            AppError::InvalidRequest(format!(
+                "Failed to parse batch BatchCreateCollabParams: {}",
+                err
+            ))
+        })?,
+        Some(_) => match compress_type_from_header_value(req.headers())? {
+            CompressionType::Brotli { buffer_size } => {
+                let decompress_data = decompress(payload.to_vec(), buffer_size).await?;
+                BatchCreateCollabParams::from_bytes(&decompress_data).map_err(|err| {
+                    AppError::InvalidRequest(format!(
+                        "Failed to parse BatchCreateCollabParams with decompression data: {}",
+                        err
+                    ))
+                })?
+            },
+        },
+    };
+    params.validate().map_err(AppError::from)?;
+    let BatchCreateCollabParams {
+        workspace_id,
+        params_list,
+    } = params;
+    if params_list.is_empty() {
+        return Err(AppError::InvalidRequest("Empty collab params list".to_string()).into());
+    }
+    let mut transaction = state
+        .pg_pool
+        .begin()
+        .await
+        .context("acquire transaction to upsert collab")
+        .map_err(AppError::from)?;
+    for params in params_list {
+        let _object_id = params.object_id.clone();
+        state
+            .collab_access_control_storage
+            .insert_or_update_collab_with_transaction(&workspace_id, &uid, params, &mut transaction)
+            .await?;
+    }
+    transaction
+        .commit()
+        .await
+        .context("fail to commit the transaction to upsert collab")
+        .map_err(AppError::from)?;
+    Ok(Json(AppResponse::Ok()))
+}
+
+async fn get_collab_handler(
+    user_uuid: UserUuid,
+    payload: Json<QueryCollabParams>,
+    state: Data<AppState>,
+) -> Result<Json<AppResponse<EncodedCollab>>> {
+    let uid = state
+        .user_cache
+        .get_user_uid(&user_uuid)
+        .await
+        .map_err(AppResponseError::from)?;
+    let data = state
+        .collab_access_control_storage
+        .get_collab_encoded(&uid, payload.into_inner(), false)
+        .await
+        .map_err(AppResponseError::from)?;
+    Ok(Json(AppResponse::Ok().with_data(data)))
+}
+
+#[instrument(level = "trace", skip_all, err)]
+async fn get_collab_snapshot_handler(
+    payload: Json<QuerySnapshotParams>,
+    path: web::Path<(String, String)>,
+    state: Data<AppState>,
+) -> Result<Json<AppResponse<SnapshotData>>> {
+    let (workspace_id, object_id) = path.into_inner();
+    let data = state
+        .collab_access_control_storage
+        .get_collab_snapshot(&workspace_id.to_string(), &object_id, &payload.snapshot_id)
+        .await
+        .map_err(AppResponseError::from)?;
+    Ok(Json(AppResponse::Ok().with_data(data)))
+}
+
+#[instrument(level = "trace", skip_all, err)]
+async fn create_collab_snapshot_handler(
+    user_uuid: UserUuid,
+    state: Data<AppState>,
+    path: web::Path<(String, String)>,
+    payload: Json<CollabType>,
+) -> Result<Json<AppResponse<AFSnapshotMeta>>> {
+    let (workspace_id, object_id) = path.into_inner();
+    let collab_type = payload.into_inner();
+    let uid = state
+        .user_cache
+        .get_user_uid(&user_uuid)
+        .await
+        .map_err(AppResponseError::from)?;
+    let encoded_collab_v1 = state
+        .collab_access_control_storage
+        .get_collab_encoded(
+            &uid,
+            QueryCollabParams::new(&object_id, collab_type, &workspace_id),
+            false,
+        )
+        .await?
+        .encode_to_bytes()
+        .unwrap();
+    let meta = state
+        .collab_access_control_storage
+        .create_snapshot(InsertSnapshotParams {
+            object_id,
+            workspace_id,
+            encoded_collab_v1,
+        })
+        .await?;
+    Ok(Json(AppResponse::Ok().with_data(meta)))
+}
