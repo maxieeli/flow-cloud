@@ -247,3 +247,164 @@ async fn post_workspace_invite_handler(
     .await?;
     Ok(AppResponse::Ok().into())
 }
+
+async fn get_workspace_invite_handler(
+    user_uuid: UserUuid,
+    state: Data<AppState>,
+    query: web::Query<WorkspaceInviteQuery>,
+) -> Result<JsonAppResponse<Vec<AFWorkspaceInvitation>>> {
+    let query = query.into_inner();
+    let res =
+        workspace::ops::list_workspace_invitations_for_user(&state.pg_pool, &user_uuid, query.status)
+            .await?;
+    Ok(AppResponse::Ok().with_data(res).into())
+}
+
+async fn post_accept_workspace_invite_handler(
+    user_uuid: UserUuid,
+    invite_id: web::Path<Uuid>,
+    state: Data<AppState>,
+) -> Result<JsonAppResponse<()>> {
+    let invite_id = invite_id.into_inner();
+    workspace::ops::accept_workspace_invite(
+        &state.pg_pool,
+        &state.workspace_access_control,
+        &user_uuid,
+        &invite_id,
+    )
+    .await?;
+    Ok(AppResponse::Ok().into())
+}
+
+#[instrument(skip_all, err)]
+async fn get_workspace_members_handler(
+    user_uuid: UserUuid,
+    state: Data<AppState>,
+    workspace_id: web::Path<Uuid>,
+) -> Result<JsonAppResponse<Vec<AFWorkspaceMember>>> {
+    let members = workspace::ops::get_workspace_members(&state.pg_pool, &user_uuid, &workspace_id)
+        .await?
+        .into_iter()
+        .map(|member| AFWorkspaceMember {
+            name: member.name,
+            email: member.email,
+            role: member.role,
+            avatar_url: None,
+        })
+        .collect();
+    Ok(AppResponse::Ok().with_data(members).into())
+}
+
+#[instrument(skip_all, err)]
+async fn remove_workspace_member_handler(
+    _user_uuid: UserUuid,
+    payload: Json<WorkspaceMembers>,
+    state: Data<AppState>,
+    workspace_id: web::Path<Uuid>,
+) -> Result<JsonAppResponse<()>> {
+    let member_emails = payload
+        .into_inner()
+        .0
+        .into_iter()
+        .map(|member| member.0)
+        .collect::<Vec<String>>();
+    workspace::ops::remove_workspace_members(
+        &state.pg_pool,
+        &workspace_id,
+        &member_emails,
+        &state.workspace_access_control,
+    )
+    .await?;
+    Ok(AppResponse::Ok().into())
+}
+
+#[instrument(level = "debug", skip_all, err)]
+async fn open_workspace_handler(
+    user_uuid: UserUuid,
+    state: Data<AppState>,
+    workspace_id: web::Path<Uuid>,
+) -> Result<JsonAppResponse<AFWorkspace>> {
+    let workspace_id = workspace_id.into_inner();
+    let workspace = workspace::ops::open_workspace(&state.pg_pool, &user_uuid, &workspace_id).await?;
+    Ok(AppResponse::Ok().with_data(workspace).into())
+}
+
+#[instrument(level = "debug", skip_all, err)]
+async fn leave_workspace_handler(
+    user_uuid: UserUuid,
+    state: Data<AppState>,
+    workspace_id: web::Path<Uuid>,
+) -> Result<JsonAppResponse<()>> {
+    let workspace_id = workspace_id.into_inner();
+    workspace::ops::leave_workspace(
+        &state.pg_pool,
+        &workspace_id,
+        &user_uuid,
+        &state.workspace_access_control,
+    )
+    .await?;
+    Ok(AppResponse::Ok().into())
+}
+
+#[instrument(level = "debug", skip_all, err)]
+async fn update_workspace_member_handler(
+    payload: Json<WorkspaceMemberChangeset>,
+    state: Data<AppState>,
+    workspace_id: web::Path<Uuid>,
+) -> Result<JsonAppResponse<()>> {
+    // TODO: only owner is allowed to update member role
+    let workspace_id = workspace_id.into_inner();
+    let changeset = payload.into_inner();
+  
+    if changeset.role.is_some() {
+        let uid = select_uid_from_email(&state.pg_pool, &changeset.email)
+            .await
+            .map_err(AppResponseError::from)?;
+        workspace::ops::update_workspace_member(
+            &uid,
+            &state.pg_pool,
+            &workspace_id,
+            &changeset,
+            &state.workspace_access_control,
+        )
+        .await?;
+    }
+    Ok(AppResponse::Ok().into())
+}
+
+#[instrument(skip(state, payload), err)]
+async fn create_collab_handler(
+    user_uuid: UserUuid,
+    payload: Bytes,
+    state: Data<AppState>,
+    req: HttpRequest,
+) -> Result<Json<AppResponse<()>>> {
+    let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+    let params = match req.headers().get(X_COMPRESSION_TYPE) {
+        None => serde_json::from_slice::<CreateCollabParams>(&payload).map_err(|err| {
+            AppError::InvalidRequest(format!(
+                "Failed to parse CreateCollabParams from JSON: {}",
+                err
+            ))
+        })?,
+        Some(_) => match compress_type_from_header_value(req.headers())? {
+            CompressionType::Brotli { buffer_size } => {
+                let decompress_data = decompress(payload.to_vec(), buffer_size).await?;
+                CreateCollabParams::from_bytes(&decompress_data).map_err(|err| {
+                    AppError::InvalidRequest(format!(
+                        "Failed to parse CreateCollabParams with brotli decompression data: {}",
+                        err
+                    ))
+                })?
+            },
+        },
+    };
+    let (params, workspace_id) = params.split();
+    state
+        .collab_access_control_storage
+        .insert_or_update_collab(&workspace_id, &uid, params)
+        .await?;
+    Ok(Json(AppResponse::Ok()))
+}
+
+
