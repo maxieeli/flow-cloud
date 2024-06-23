@@ -154,3 +154,96 @@ async fn create_workspace_handler(
     .await?;
     Ok(AppResponse::Ok().with_data(new_workspace).into())
 }
+
+// Adds a workspace for user, if success, return the workspace id
+#[instrument(skip_all, err)]
+async fn patch_workspace_handler(
+    _uuid: UserUuid,
+    state: Data<AppState>,
+    params: Json<PatchWorkspaceParam>,
+) -> Result<Json<AppResponse<()>>> {
+    let params = params.into_inner();
+    workspace::ops::patch_workspace(
+        &state.pg_pool,
+        &params.workspace_id,
+        params.workspace_name.as_deref(),
+        params.workspace_icon.as_deref(),
+    )
+    .await?;
+    Ok(AppResponse::Ok().into())
+}
+
+async fn delete_workspace_handler(
+    _user_id: UserUuid,
+    workspace_id: web::Path<Uuid>,
+    state: Data<AppState>,
+) -> Result<Json<AppResponse<()>>> {
+    let bucket_storage = &state.bucket_storage;
+    // TODO: add permission for workspace deletion
+    workspace::ops::delete_workspace_for_user(&state.pg_pool, &workspace_id, bucket_storage).await?;
+    Ok(AppResponse::Ok().into())
+}
+
+// TODO: also get shared workspaces
+#[instrument(skip_all, err)]
+async fn list_workspace_handler(
+    uuid: UserUuid,
+    state: Data<AppState>,
+) -> Result<JsonAppResponse<AFWorkspaces>> {
+    let rows = workspace::ops::get_all_user_workspaces(&state.pg_pool, &uuid).await?;
+    let workspaces = rows
+        .into_iter()
+        .flat_map(|row| {
+            let result = AFWorkspace::try_from(row);
+            if let Err(err) = &result {
+                event!(
+                    tracing::Level::ERROR,
+                    "Failed to convert workspace row to AFWorkspace: {:?}",
+                    err
+                );
+            }
+            result
+        })
+        .collect::<Vec<_>>();
+    Ok(AppResponse::Ok().with_data(AFWorkspaces(workspaces)).into())
+}
+
+// Deprecated
+#[instrument(skip(payload, state), err)]
+async fn create_workspace_members_handler(
+    user_uuid: UserUuid,
+    workspace_id: web::Path<Uuid>,
+    payload: Json<CreateWorkspaceMembers>,
+    state: Data<AppState>,
+) -> Result<JsonAppResponse<()>> {
+    let create_members = payload.into_inner();
+    workspace::ops::add_workspace_members(
+        &state.pg_pool,
+        &user_uuid,
+        &workspace_id,
+        create_members.0,
+        &state.workspace_access_control,
+    )
+    .await?;
+    Ok(AppResponse::Ok().into())
+}
+
+#[instrument(skip(payload, state), err)]
+async fn post_workspace_invite_handler(
+    user_uuid: UserUuid,
+    workspace_id: web::Path<Uuid>,
+    payload: Json<Vec<WorkspaceMemberInvitation>>,
+    state: Data<AppState>,
+) -> Result<JsonAppResponse<()>> {
+    let invited_members = payload.into_inner();
+    workspace::ops::invite_workspace_members(
+        &state.pg_pool,
+        &state.gotrue_admin,
+        &state.gotrue_client,
+        &user_uuid,
+        &workspace_id,
+        invited_members,
+    )
+    .await?;
+    Ok(AppResponse::Ok().into())
+}
